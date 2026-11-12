@@ -419,3 +419,69 @@ test('阿里百炼 TTS：解析 output.audio.url 并下载音频', async () => {
     restore()
   }
 })
+
+/* ------------------------------------------- 批次 3 · B 组（T-12 / T-16） */
+
+test('T-12：CRLF 分隔的语音 SSE 也要能切出事件（以前整段 join 成坏包 → 502）', async () => {
+  // 两段音频各自是一段合法 base64，拼起来的字节数必须等于两段之和。
+  const first = Uint8Array.from([0x49, 0x44, 0x33, 0x04])
+  const second = Uint8Array.from([0x00, 0x01, 0x02, 0x03])
+  const chunkOf = (bytes: Uint8Array): string => Buffer.from(bytes).toString('base64')
+  const encoder = new TextEncoder()
+  const restore = stubFetch(async () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        /*
+         * 关键：**一个 chunk 里两个事件**，而且用 CRLF 分隔。
+         * `\r\n\r\n` 里不含 `\n\n`，旧代码 indexOf('\n\n') 一个边界都找不到，
+         * 收尾时把两行 data: 拼成一个 payload 去 JSON.parse → 必然失败。
+         */
+        const events = [
+          `data: ${JSON.stringify({ choices: [{ delta: { audio: { data: chunkOf(first) } } }] })}`,
+          `data: ${JSON.stringify({ choices: [{ delta: { audio: { data: chunkOf(second) } } }] })}`,
+          'data: [DONE]',
+        ]
+        controller.enqueue(encoder.encode(`${events.join('\r\n\r\n')}\r\n\r\n`))
+        controller.close()
+      },
+    })
+    return new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
+  })
+  try {
+    const audio = await synthesizeSpeech(speechConfig(), '你好')
+    const parsed = parseDataUrl(audio.dataUrl)
+    assert.ok(parsed !== null)
+    assert.equal(
+      Buffer.from(parsed.base64, 'base64').length,
+      first.length + second.length,
+      '两段音频没都被收到（CRLF 边界没切开，或者只吃到一段）',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('T-16：同一批多张图前 80 个 base64 字符相同，不能被当成重复丢掉', async () => {
+  // 同格式、同尺寸的 PNG 前 80 个 base64 字符往往逐字相同（文件头、尺寸块、编码参数），
+  // 只有尾部不一样。这里直接构造这种形状：前 80 字符一致，长度一致，尾部不同。
+  const shared = 'A'.repeat(80)
+  const first = `${shared}${'X'.repeat(40)}`
+  const second = `${shared}${'Y'.repeat(40)}`
+  const restore = stubFetch(async () => new Response(JSON.stringify({
+    predictions: [
+      { bytesBase64Encoded: first, mimeType: 'image/png' },
+      { bytesBase64Encoded: second, mimeType: 'image/png' },
+    ],
+  }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+  try {
+    const images = await generateImages(imageConfig({
+      protocol: 'gemini',
+      baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
+      model: 'imagen-3.0-generate-002',
+    }), { prompt: '四只猫', count: 2 })
+    assert.equal(images.length, 2, '两张真图被判成重复，只回来一张')
+    assert.notEqual(images[0]?.dataUrl, images[1]?.dataUrl)
+  } finally {
+    restore()
+  }
+})
