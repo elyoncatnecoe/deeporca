@@ -66,25 +66,24 @@ test('P0-2 / T-08：五个入口都是「先 beginTurn 占位、再做 await」'
   }
 })
 
-test('P0-2 / T-08：beginTurn 与 endTurn 成对出现，全局状态只在 endTurn 里复位', () => {
+test('P0-2 / T-08：beginTurn 与 endTurn 成对出现，busy / activeAbort 只在 turnGate 里改', () => {
   const code = stripComments(engine)
-  const begins = (code.match(/beginTurn\(\)/g) ?? []).length
+  const begins = (code.match(/= beginTurn\(\)/g) ?? []).length
   const ends = (code.match(/endTurn\(turn\)/g) ?? []).length
   assert.ok(begins >= 5, `五个入口都要占位，实际只有 ${begins} 处`)
-  // 早退分支也要 endTurn（占位之后登录失败 / 本地指令处理完都要放开），所以复位处不会少于占位处。
-  assert.ok(ends >= begins, `endTurn 只有 ${ends} 处，少于 beginTurn 的 ${begins} 处`)
+  // 早退分支不再各自补 endTurn（准备阶段已并入主 try），所以两边应当一样多。
+  assert.equal(ends, begins, `endTurn（${ends}）必须和 beginTurn（${begins}）一样多`)
   /*
-   * 这一条是本轮修复的核心不变量：activeAbort / busy 只允许在 beginTurn 与 endTurn
-   * （以及兜底的 resetSendingState）里改。散在别处的 `busy = false` 就是「旧轮收尾
-   * 把新轮状态清掉」的来源 —— 那会让新的一轮永远停不下来。
+   * 核心不变量：engine 里不许再直接碰 busy / activeAbort。
+   * 它们搬进了 src/lib/turn-gate.ts —— 那里才有归属判断，也才能写行为测试。
+   * 散在 engine 里的 `busy = false` 就是「旧轮收尾把新轮状态清掉」的来源。
    */
-  const outside = code
-    .replace(/function beginTurn[\s\S]*?\n\}/, '')
-    .replace(/function endTurn[\s\S]*?\n\}/, '')
-    .replace(/function resetSendingState[\s\S]*?\n\}/, '')
-  assert.doesNotMatch(outside, /^\s*activeAbort = null\s*$/m, 'activeAbort 只许在 endTurn / resetSendingState 里清')
-  assert.doesNotMatch(outside, /^\s*busy = false\s*$/m, 'busy 只许在 endTurn / resetSendingState 里复位')
-  assert.doesNotMatch(outside, /^\s*busy = true\s*$/m, 'busy 只许在 beginTurn 里置位')
+  assert.doesNotMatch(code, /^\s*activeAbort = /m, 'activeAbort 只许在 turn-gate.ts 里改')
+  assert.doesNotMatch(code, /^\s*busy = /m, 'busy 只许在 turn-gate.ts 里改')
+
+  const gate = stripComments(read('src/lib/turn-gate.ts'))
+  assert.match(gate, /begin\(\): Turn \| null \{/, '占位逻辑在 turnGate.begin 里')
+  assert.match(gate, /if \(activeAbort !== turn\.abort\) return false/, '归属判断在 turnGate.end 里')
 })
 
 test('P0-2：每一处置位都要有对应的复位', () => {
@@ -95,7 +94,8 @@ test('P0-2：每一处置位都要有对应的复位', () => {
 
 test('P0-2：「停止」在没有请求在跑时也能强制复位', () => {
   assert.match(engine, /function resetSendingState\(\)/)
-  assert.match(engine, /if \(busy\) resetSendingState\(\)/)
+  assert.match(engine, /if \(turnGate\.isBusy\(\)\) resetSendingState\(\)/)
+  assert.match(engine, /turnGate\.abortCurrent\(\)/, '停止优先走「中止当前这一轮」')
 })
 
 test('P1-4：本轮对话的 signal 一路传到 MCP 工具调用', () => {

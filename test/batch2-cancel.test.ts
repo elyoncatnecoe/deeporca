@@ -137,23 +137,27 @@ test('T-09：本地指令与离线回复接收 signal，并在写回复前判断
   }
 })
 
-test('T-09：sendMessage 的准备阶段抛错也必须放开 busy', () => {
+test('T-09：sendMessage 的准备阶段在主 try 里，异常由统一 finally 释放', () => {
   const start = engineCode.indexOf('export async function sendMessage')
   const end = engineCode.indexOf('export async function sendGroupMessage', start)
   const body = engineCode.slice(start, end === -1 ? undefined : end)
-  const claim = body.indexOf('beginTurn()')
-  const accepted = body.indexOf('let accepted = false')
-  assert.ok(claim > 0 && accepted > claim, '找不到 sendMessage 的准备阶段')
-  const prepare = body.slice(claim, accepted)
+  const tryAt = body.indexOf('try {')
+  const finallyAt = body.indexOf('} finally {')
+  assert.ok(tryAt > 0 && finallyAt > tryAt, '主 try/finally 要能找到')
   /*
-   * 准备阶段（本地指令 / 离线回复 / 网页账号登录）现在自己不管 busy，
-   * 任何一个 await 抛错都必须在这里 endTurn —— 否则 busy 永远停在 true，
-   * 发送键卡成「停止」，只能重启进程。
+   * 准备阶段（本地指令 / 离线回复 / 网页账号登录）自己不管 busy，全部放在主 try 里；
+   * 任何一步抛错都由同一个 finally 释放 —— 这是二审 P1 的修法：不再按分支补 endTurn，
+   * 否则总有一条路会漏（上次漏的就是 `await loginWebChat()`）。
    */
-  const resets = (prepare.match(/endTurn\(turn\)/g) ?? []).length
-  assert.ok(resets >= 3, `准备阶段至少要有三处 endTurn（本地指令 / 离线回复 / 网页登录），实际 ${resets} 处`)
-  assert.match(prepare, /catch \(error\) \{\s*endTurn\(turn\)/, '本地指令与网页登录的 catch 里要 endTurn')
-  assert.match(prepare, /finally \{\s*endTurn\(turn\)\s*\}/, '离线回复的 finally 里要 endTurn')
+  const prepare = body.slice(tryAt, finallyAt)
+  for (const anchor of ['runLocalCommand(', 'runOfflineReply(', 'ensureWebChatLogin(']) {
+    assert.ok(prepare.includes(anchor), `${anchor} 必须在主 try 里，否则它抛错时没人释放这一轮`)
+  }
+  assert.equal(
+    (body.match(/endTurn\(turn\)/g) ?? []).length,
+    1,
+    '释放只留 finally 一处，准备阶段不许再有零散的 endTurn 补丁',
+  )
 })
 
 test('T-09：本地路径不再自己抢 busy（会和 beginTurn 打架）', () => {

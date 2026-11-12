@@ -32,6 +32,8 @@ import { mediaRefOf } from './media-store'
 import { currentProvider, isWebChatProvider } from './providers'
 import { webChatReady, loginWebChat, setWebChatContext } from './web-chat'
 import { buildWebChatContext } from './web-context'
+import { createTurnGate, type Turn } from './turn-gate'
+import { ensureWebChatLogin } from './web-login-step'
 
 /**
  * 一次发言允许的工具循环轮数。
@@ -42,8 +44,8 @@ import { buildWebChatContext } from './web-context'
  */
 const MAX_TOOL_ITERATIONS = 10
 
-let activeAbort: AbortController | null = null
-let busy = false
+/** 一轮发送的占位/释放都走这个门；抽到 src/lib/turn-gate.ts 是为了能写行为测试。 */
+const turnGate = createTurnGate()
 /**
  * 本轮回复要落进哪个消息节点。null = 新消息（各自成节点）。
  * 重新生成时设为被重新生成那条的 nodeId，于是新回复成为同节点的另一个候选。
@@ -64,25 +66,14 @@ let turnNodeId: string | null = null
  * 的那一份。五个入口（sendMessage / sendGroupMessage / continueTurn / regenerate /
  * editAndResend）必须成对使用，漏一个就会出现「旧任务清掉新任务状态」。
  */
-interface Turn {
-  abort: AbortController
-}
-
 /** 占住「正在发送」并建立这一轮的 controller。返回 null 表示已经有一轮在跑。 */
 function beginTurn(): Turn | null {
-  if (busy) return null
-  busy = true
-  const abort = new AbortController()
-  activeAbort = abort
-  return { abort }
+  return turnGate.begin()
 }
 
 /** 只在这一轮仍然是当前轮时复位。旧轮晚到的 finally 不许动新轮的状态。 */
 function endTurn(turn: Turn): void {
-  if (activeAbort !== turn.abort) return
-  activeAbort = null
-  busy = false
-  turnNodeId = null
+  if (turnGate.end(turn)) turnNodeId = null
 }
 
 /**
@@ -91,24 +82,20 @@ function endTurn(turn: Turn): void {
  */
 function resetSendingState(): void {
   turnNodeId = null
-  activeAbort = null
-  busy = false
+  turnGate.reset()
   const actions = useAppStore.getState().actions
   actions.setSending(false)
   actions.endLive()
 }
 
 export function stopSending(): void {
-  if (activeAbort !== null) {
-    activeAbort.abort()
-    return
-  }
+  if (turnGate.abortCurrent()) return
   // 还挂着 sending 却没有在跑的请求：说明上一次收尾漏了（BUG-REVIEW P0-2）。
-  if (busy) resetSendingState()
+  if (turnGate.isBusy()) resetSendingState()
 }
 
 export function isSending(): boolean {
-  return busy
+  return turnGate.isBusy()
 }
 
 function errorText(error: unknown): string {
@@ -293,72 +280,62 @@ export async function sendMessage(
   const settings = store.settings
 
   /*
-   * 「转个圈」「吐泡泡」这类是给虎鲸的动作口令，本地做完就结束。
+   * 一轮发送的全部工作 —— 准备阶段（本地指令 / 离线回复 / 网页账号登录）和生成阶段 ——
+   * 都放在这一个 try 里，释放只由末尾那一个 finally 负责。
    *
-   * 这两个本地函数自己不再管 busy（T-09），所以异常必须在这里放开：
-   * 一旦它们抛错而 busy 留在 true，发送键就永久卡成「停止」，只能重启进程
-   * —— 正是 P0-2 那个老毛病换了个入口。
+   * 以前准备阶段是一堆零散的 endTurn 补丁：本地指令一个 try/catch、离线回复一个
+   * try/finally、webChatReady 一个 try/catch……而 `await loginWebChat()` 那一步谁都没管。
+   * 它内部是 native.webApiLogin / webChatShow / webApiCapture 三个真实异步，任何一个
+   * reject，endTurn 就轮不到执行 —— busy 永远停在 true，发送键卡成「停止」，
+   * 只能重启进程（二审 P1）。
+   *
+   * 现在不分类讨论：只要 beginTurn() 成功，这个 finally 就一定会跑到。
+   * 逐轮归属判断仍留在 endTurn 里（旧轮晚到的 finally 不会清掉新轮的 controller）。
+   *
+   * 失败照旧往上报：catch 里 `stream === null` 那条分支就是「还没开始生成就失败」，
+   * 只提示原因、不伪造助手消息，输入框保留原文，用户可以直接重试。
+   *
+   * accepted 记「用户消息是否已落库」，失败时决定输入框要不要清空；
+   * stream 非空表示已经进入生成阶段（失败才需要落一条助手消息）。
    */
-  let localHandled = false
-  try {
-    localHandled = await runLocalCommand(trimmed, attachments, signal)
-  } catch (error) {
-    endTurn(turn)
-    throw error
-  }
-  if (localHandled) {
-    endTurn(turn)
-    return true
-  }
-
-  // 没接 Key 不等于「什么都不能做」：虎鲸仍然在，只是暂时说不了长话。
-  // 所以这里绝不把用户强行弹到设置页——那会打断每一次普通对话。
-  // 只把消息照常存下来，回一句本地短话，并在输入框上方留一个可点的提示。
-  if (hasApiKey(settings) === false) {
-    try {
-      return await runOfflineReply(trimmed, attachments, signal)
-    } finally {
-      endTurn(turn)
-    }
-  }
-
-  // 网页账号模式：附件要走网页账号的上传接口（纯 HTTP 模式支持；网页窗遥控模式会提示）。
-  // 这里不再一刀切拒绝，交给 deepseek.ts 的网页链路处理。
-
-  // 网页账号模式的前置条件：有可用的登录态（HTTP 模式），或者网页窗开着
-  // （DOM 遥控后备）。两者都没有才需要用户去登录——而且登录一次就行，
-  // 之后窗口关不关都不影响聊天。
-  if (isWebChatProvider(settings)) {
-    // busy 已经占住了：webChatReady() 抛错时若不放开，发送键会永久卡成「停止」。
-    let ready: boolean
-    try {
-      ready = await webChatReady()
-    } catch (error) {
-      endTurn(turn)
-      throw error
-    }
-    if (!ready) {
-      const login = await loginWebChat()
-      if (!login.ok) {
-        useAppStore.getState().actions.showToast(login.message ?? '网页账号还没登录；请在弹出的窗口里登录一次')
-        endTurn(turn)
-        return false
-      }
-      useAppStore.getState().actions.showToast('网页账号已连接；以后不用再登录了')
-    }
-  }
-
-  store.actions.setNotice('')
-  stageBridge.current?.pulse('send')
-
-  // 从这里到 runAssistantTurn 结束，必须整段包在 try/finally 里。
-  // 旧写法把「建会话 / 落用户消息 / 改标题」三个 await 留在 try 外面，任何一步
-  // 抛错都会让 busy 永远停在 true —— 发送键卡成「停止」，只能重启进程才恢复
-  // （BUG-REVIEW P0-2）。accepted 记「用户消息是否已落库」，失败时决定输入框
-  // 要不要清空；stream 非空表示已经进入生成阶段（失败才需要落一条助手消息）。
   let accepted = false
   let stream: { conversationId: string; history: ChatMessage[] } | null = null
   try {
+    // ---- 准备阶段 ----
+
+    // 「转个圈」「吐泡泡」这类是给虎鲸的动作口令，本地做完就结束。
+    if (await runLocalCommand(trimmed, attachments, signal)) return true
+
+    // 没接 Key 不等于「什么都不能做」：虎鲸仍然在，只是暂时说不了长话。
+    // 所以这里绝不把用户强行弹到设置页——那会打断每一次普通对话。
+    // 只把消息照常存下来，回一句本地短话，并在输入框上方留一个可点的提示。
+    if (hasApiKey(settings) === false) {
+      return await runOfflineReply(trimmed, attachments, signal)
+    }
+
+    // 网页账号模式：附件要走网页账号的上传接口（纯 HTTP 模式支持；网页窗遥控模式会提示）。
+    // 这里不再一刀切拒绝，交给 deepseek.ts 的网页链路处理。
+    //
+    // 前置条件：有可用的登录态（HTTP 模式），或者网页窗开着（DOM 遥控后备）。
+    // 两者都没有才需要用户去登录——而且登录一次就行，之后窗口关不关都不影响聊天。
+    if (isWebChatProvider(settings)) {
+      /*
+       * 这一步会走 native.webApiLogin / webChatShow / webApiCapture 三个真实异步，
+       * 任何一个 reject 都会抛出去 —— 由本函数统一的 try/finally 负责释放这一轮，
+       * catch 里 `stream === null` 那条分支负责提示原因（二审 P1）。
+       */
+      const outcome = await ensureWebChatLogin({ webChatReady, loginWebChat })
+      if (outcome.kind === 'blocked') {
+        useAppStore.getState().actions.showToast(outcome.message)
+        return false
+      }
+      if (outcome.justLoggedIn) useAppStore.getState().actions.showToast('网页账号已连接；以后不用再登录了')
+    }
+
+    store.actions.setNotice('')
+    stageBridge.current?.pulse('send')
+
+    // ---- 生成阶段 ----
     let conversationId = store.activeId
     if (conversationId === null) {
       conversationId = await store.actions.createConversation()
@@ -465,7 +442,7 @@ export async function sendGroupMessage(
   options: { onAccepted?: () => void } = {},
 ): Promise<boolean> {
   const trimmed = text.trim()
-  if ((trimmed === '' && attachments.length === 0) || busy) return false
+  if ((trimmed === '' && attachments.length === 0) || turnGate.isBusy()) return false
   const store = useAppStore.getState()
   const settings = store.settings
   const conversationId = store.activeId
@@ -1144,7 +1121,7 @@ async function runAssistantTurn(options: {
  * 用户点一下就走，看起来是同一段回答继续往下写。
  */
 export async function continueTurn(messageId: string): Promise<boolean> {
-  if (busy) {
+  if (turnGate.isBusy()) {
     useAppStore.getState().actions.showToast('还在回复中，等这一轮结束再继续')
     return false
   }
@@ -1380,7 +1357,7 @@ async function runTool(
  * 之前的历史（到上一条用户消息为止）保持不变。
  */
 export async function regenerateAtMessage(messageId: string): Promise<boolean> {
-  if (busy) return false
+  if (turnGate.isBusy()) return false
   const store = useAppStore.getState()
   const settings = store.settings
   if (hasApiKey(settings) === false) {
@@ -1437,7 +1414,7 @@ export async function regenerateAtMessage(messageId: string): Promise<boolean> {
  * 然后从这条位置继续生成。
  */
 export async function editAndResend(messageId: string, text: string): Promise<boolean> {
-  if (busy) return false
+  if (turnGate.isBusy()) return false
   const trimmed = text.trim()
   if (trimmed === '') return false
   const store = useAppStore.getState()
