@@ -1,0 +1,57 @@
+node_modules/
+dist/
+dist-app/
+dist-apk/
+electron-dist/
+.toolchain/
+.secrets/
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/keystore.properties
+android/keystore/
+*.log
+
+# 调试残留（本地测试产物，不该进仓库）
+write-test.txt
+*.tmpdir/
+shots/crop-*.png
+shots/test-*.png
+shots/e2e-*.txt
+host-*.png
+
+# 系统杂物
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# 本地备份（不该进仓库）
+.backup/
+_backup-*/
+_backup-latest.txt
+
+# 调试/探针残留目录
+_tmp/
+.probe-*/
+.e2e-profile/
+
+# 截图与内部开发日志：公开仓库一律不带（可能含聊天内容、本机路径）
+shots/
+.import-shots/
+_probes/
+PROGRESS.md
+NOTES.md
+BUG-REVIEW.md
+TASK.md
+RESEARCH-*.md
+PLAN-*.md
+_verify-*.mjs
+_probe-*.mjs
+_web-theme.backup.css
+
+# 签名私钥与密码（自建构建时才需要，绝不入库）
+*.jks
+*.keystore
+keystore.txt
+google-services.json

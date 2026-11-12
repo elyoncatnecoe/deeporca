@@ -1,0 +1,363 @@
+/*
+ * 日历便签屏（CalendarScreen.tsx）的专属样式。
+ *
+ * 为什么单独一个文件而不是塞进 styles.css：
+ * - 这个屏是 rel 新增的，样式只服务于它自己，跟着组件走比在 6000 多行的 styles.css 里翻找更清楚；
+ * - main.tsx 已经把 styles.css 打包，组件再 import 一个局部 css 由 Vite 自动合并，
+ *   顺序上局部样式在后，能安全覆盖/扩展通用类。
+ *
+ * 颜色全部用 styles.css :root 里的变量（--aqua / --line / --text / --faint …），
+ * 这样切 data-tone 主题时会一起换色。
+ */
+
+/* ---------------------------------------------------------------- 工具条 */
+
+.calendar-toolbar {
+  gap: 12px;
+}
+
+.calendar-view-toggle {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(8, 31, 42, 0.55);
+}
+
+.calendar-view-toggle .chip {
+  border: 0;
+  padding: 5px 14px;
+}
+
+.calendar-view-toggle .chip.is-active {
+  background: rgba(127, 227, 212, 0.16);
+}
+
+/* ---------------------------------------------------------------- 月历本体 */
+
+.calendar-month {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.calendar-month-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.calendar-month-head strong {
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+
+.calendar-spacer {
+  flex: 1;
+}
+
+.calendar-weekdays {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 4px;
+  padding: 0 2px;
+}
+
+.calendar-weekdays span {
+  text-align: center;
+  color: var(--faint);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+
+.calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.calendar-cell {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 5px;
+  min-height: 52px;
+  padding: 7px 4px 6px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background: rgba(8, 31, 42, 0.4);
+  color: var(--dim);
+  transition: background 130ms ease, border-color 130ms ease, color 130ms ease;
+}
+
+.calendar-cell:hover {
+  background: rgba(127, 227, 212, 0.07);
+  border-color: var(--line);
+}
+
+.calendar-cell.is-empty {
+  background: transparent;
+  pointer-events: none;
+}
+
+.calendar-cell.is-today {
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+
+.calendar-cell.is-selected {
+  border-color: rgba(127, 227, 212, 0.62);
+  background: rgba(127, 227, 212, 0.12);
+  color: var(--text);
+}
+
+.calendar-cell.has-notes .calendar-cell-day {
+  font-weight: 650;
+}
+
+.calendar-cell-day {
+  font-size: 12.5px;
+  line-height: 1;
+}
+
+/* 今天是实心圆：比只有描边更醒目，又不会和「选中」的整格高亮打架。 */
+.calendar-cell.is-today .calendar-cell-day {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--aqua);
+  color: #04211f;
+  font-weight: 700;
+}
+
+.calendar-dots {
+  display: flex;
+  gap: 3px;
+  align-items: center;
+  justify-content: center;
+  min-height: 5px;
+}
+
+.calendar-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--faint);
+}
+
+.calendar-dot.kind-memo { background: #9fd8ea; }
+.calendar-dot.kind-reminder { background: var(--accent); }
+.calendar-dot.kind-todo { background: var(--aqua); }
+
+/* ---------------------------------------------------------------- 当天清单 */
+
+.calendar-day-panel {
+  margin-top: 4px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.calendar-day-panel > header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.calendar-day-panel > header strong {
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.calendar-day-panel > header small {
+  color: var(--faint);
+  font-size: 10.5px;
+}
+
+.calendar-empty-line {
+  margin: 6px 0;
+  color: var(--faint);
+  font-size: 11.5px;
+}
+
+.calendar-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.calendar-notes {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* ---------------------------------------------------------------- 便签卡片 */
+
+.calendar-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: rgba(8, 31, 42, 0.55);
+  transition: border-color 130ms ease, background 130ms ease;
+}
+
+.calendar-note:hover {
+  border-color: var(--line-strong);
+}
+
+.calendar-note.is-done {
+  opacity: 0.62;
+}
+
+.calendar-note.is-done .calendar-note-title {
+  text-decoration: line-through;
+  text-decoration-color: var(--faint);
+}
+
+/* 圆形勾选框：和 App 的圆角语言一致，比原生 checkbox 好在触屏上好点。 */
+.calendar-check {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-top: 1px;
+  border: 1.5px solid var(--line-strong);
+  border-radius: 50%;
+  background: transparent;
+  color: #04211f;
+  transition: background 130ms ease, border-color 130ms ease;
+}
+
+.calendar-check:hover {
+  border-color: var(--aqua);
+}
+
+.calendar-check.is-done {
+  border-color: var(--aqua);
+  background: var(--aqua);
+}
+
+.calendar-note-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.calendar-note-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.calendar-note-body {
+  margin: 0;
+  color: var(--dim);
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.calendar-note-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.calendar-kind-badge {
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  border: 1px solid var(--line);
+  color: var(--faint);
+}
+
+.calendar-kind-badge.kind-memo {
+  color: #9fd8ea;
+  border-color: rgba(159, 216, 234, 0.28);
+}
+
+.calendar-kind-badge.kind-reminder {
+  color: var(--accent);
+  border-color: rgba(255, 155, 122, 0.3);
+}
+
+.calendar-kind-badge.kind-todo {
+  color: var(--aqua);
+  border-color: rgba(127, 227, 212, 0.3);
+}
+
+.calendar-time {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--dim);
+  font-size: 10.5px;
+}
+
+.calendar-repeat {
+  color: var(--faint);
+  font-size: 10.5px;
+}
+
+.calendar-author {
+  color: var(--faint);
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(127, 227, 212, 0.08);
+}
+
+.calendar-note-actions {
+  flex: none;
+  display: flex;
+  gap: 2px;
+  align-self: center;
+}
+
+.calendar-note-actions .icon-button {
+  width: 30px;
+  height: 30px;
+}
+
+.calendar-notify-button {
+  margin-left: 2px;
+  color: var(--aqua);
+}
+
+/* ---------------------------------------------------------------- 触屏微调 */
+
+@media (max-width: 600px) {
+  /* 手机上点按目标要更大：格子拉到 56px，圆点也跟着明显一点。 */
+  .calendar-cell {
+    min-height: 56px;
+  }
+
+  .calendar-note {
+    padding: 11px 10px;
+  }
+
+  .calendar-note-actions .icon-button {
+    width: 34px;
+    height: 34px;
+  }
+}

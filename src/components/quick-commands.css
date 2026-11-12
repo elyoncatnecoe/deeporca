@@ -1,0 +1,179 @@
+/*
+ * 快捷指令弹层（QuickCommands.tsx）。
+ *
+ * 面板是 createPortal 挂到 body 上的 position: fixed —— 位置由组件的
+ * getBoundingClientRect() 写在内联 style 上（同 ui.tsx 的 .select-panel），
+ * 所以这里只写外观，不写 top/left，免得和 React 的内联样式互相覆盖。
+ *
+ * 层级取 60：与 .select-panel 一致，高于 .app 里的页内浮层（.ui 10 /
+ * .search-panel 20 / .onboarding 40 / .drawer-backdrop 50），低于
+ * .modal-backdrop(100) 和 .toast(200)。详见 styles.css 里 .select-wrap 上方的注释。
+ */
+
+.quick-cmd-panel {
+  position: fixed;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 8px;
+  border: 1px solid var(--line-strong);
+  /* 比 --radius(22px) 收 6px：小弹层用 22px 会圆成一团，16px 更接近现有
+     popover（.model-popover / .thinking-popover 都是 14px）的观感。 */
+  border-radius: calc(var(--radius) - 6px);
+  background: var(--glass-strong);
+  box-shadow: var(--shadow);
+  -webkit-backdrop-filter: blur(22px);
+  backdrop-filter: blur(22px);
+  overflow: hidden;
+}
+
+/* 首帧还在量位置：先占位但不可见，避免在 (0,0) 闪一下。 */
+.quick-cmd-panel.is-placing {
+  visibility: hidden;
+}
+
+.quick-cmd-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  padding: 2px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.quick-cmd-group {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.quick-cmd-group-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0;
+  padding: 0 6px;
+  color: var(--faint);
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.quick-cmd-group-title small {
+  color: var(--faint);
+  font-size: 8.5px;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+/* 动作词都只有两三个字，三列铺开比一列成行省一半高度，一屏能看全 11 个。 */
+.quick-cmd-chips {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.quick-cmd-chip {
+  min-height: 30px;
+  padding: 6px 4px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: rgba(127, 227, 212, 0.05);
+  color: var(--text);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background 140ms ease, border-color 140ms ease;
+}
+
+.quick-cmd-chip:hover {
+  background: rgba(127, 227, 212, 0.12);
+  border-color: var(--line-strong);
+}
+
+.quick-cmd-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.quick-cmd-item {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: 100%;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+.quick-cmd-item:hover {
+  background: rgba(127, 227, 212, 0.07);
+}
+
+.quick-cmd-item strong {
+  font-size: 11.5px;
+  font-weight: 650;
+}
+
+/* 把真正会填进去的句子写出来（最多两行）：点之前就知道会得到什么。 */
+.quick-cmd-item small {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  color: var(--faint);
+  font-size: 9.5px;
+  line-height: 1.35;
+}
+
+.quick-cmd-chip:focus-visible,
+.quick-cmd-item:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 1px rgba(127, 227, 212, 0.42);
+}
+
+.quick-cmd-note {
+  flex: none;
+  margin: 8px 4px 0;
+  padding-top: 7px;
+  border-top: 1px solid var(--line);
+  color: var(--faint);
+  font-size: 9px;
+}
+
+/* 展开时按钮亮一下，语义同 .composer-chip[data-active="true"]。 */
+.quick-cmd-trigger.is-open {
+  background: rgba(127, 227, 212, 0.1);
+  border-color: var(--line);
+  color: var(--aqua);
+}
+
+/* 触屏：手指比鼠标粗，动作词和指令行都要再高一点（和头部 34px 图标同一档）。 */
+@media (max-width: 600px) {
+  .quick-cmd-panel {
+    padding: 7px;
+  }
+
+  .quick-cmd-chip {
+    min-height: 34px;
+    font-size: 11.5px;
+  }
+
+  .quick-cmd-item {
+    padding: 9px 8px;
+  }
+
+  .quick-cmd-item small {
+    font-size: 10px;
+  }
+}

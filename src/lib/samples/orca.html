@@ -1,0 +1,836 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>纸雕虎鲸 · 海底互动海洋</title>
+    <style>
+        :root {
+            --paper-bg: #f4efe6;
+            --paper-shadow: #c2b5a0;
+            --paper-dark: #3a3226;
+            --wood-light: #8b7355;
+            --wood-dark: #5a4328;
+            --orca-body: #6b83a0;
+            --orca-belly: #e8e0d5;
+            --orca-shadow: #4a5560;
+            --bubble-color: #d9d0c0;
+            --heart-color: #cc9b9b;
+            --angry-symbol-color: #c8a8a8;
+            --text-color: #5a4e3e;
+            --hint-bg: #f0eadc;
+            --sand-color: #c4a882;
+            --coral-color: #c87d7d;
+            --controls-bg: #ebe5d8;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { overscroll-behavior: none; }
+        body {
+            min-height: 100vh; display: flex; align-items: center; justify-content: center;
+            background: radial-gradient(ellipse at center, #5a4e3e 0%, #2c2416 100%);
+            font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent;
+            padding: 20px;
+        }
+        .frame {
+            background: linear-gradient(135deg, var(--wood-light) 0%, var(--wood-dark) 100%);
+            padding: 20px 24px 16px; border-radius: 32px;
+            box-shadow: inset 0 0 30px rgba(0,0,0,0.5), 0 12px 40px rgba(0,0,0,0.6), 0 0 0 4px rgba(0,0,0,0.2);
+            position: relative; display: flex; flex-direction: column; align-items: center; gap: 14px;
+        }
+        .frame::before {
+            content: ''; position: absolute; inset: 8px; border-radius: 24px;
+            background: rgba(0,0,0,0.15); pointer-events: none;
+            box-shadow: inset 0 0 20px rgba(0,0,0,0.3);
+        }
+        .scene-wrapper {
+            position: relative; width: 90vmin; height: 90vmin;
+            max-width: 560px; max-height: 560px; border-radius: 50%;
+            display: flex; align-items: center; justify-content: center; z-index: 2;
+        }
+        .ocean-scene {
+            position: absolute; inset: 0; border-radius: 50%; overflow: hidden; cursor: grab;
+            background: radial-gradient(ellipse at 50% 30%, rgba(180,190,170,0.4) 0%, transparent 60%),
+                linear-gradient(180deg, #b7c4c4 0%, #9aacaa 35%, #7d8f8a 65%, #5a6b66 85%, #4a5550 100%);
+            box-shadow: inset 0 2px 12px rgba(0,0,0,0.1), 0 4px 20px rgba(0,0,0,0.3);
+            transition: box-shadow 0.6s ease;
+            touch-action: none;
+        }
+        .ocean-scene.jumping-scene {
+            box-shadow: inset 0 2px 12px rgba(0,0,0,0.1), 0 8px 30px rgba(0,0,0,0.5);
+        }
+        .ocean-scene svg { display: block; width: 100%; height: 100%; position: relative; z-index: 2; }
+        .paper-texture {
+            position: absolute; inset: 0; z-index: 5; pointer-events: none; opacity: 0.35; mix-blend-mode: multiply;
+            background: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.35'/%3E%3C/svg%3E");
+            border-radius: 50%;
+        }
+        .controls-bar {
+            position: relative; z-index: 3; display: flex; align-items: center; gap: 14px;
+            margin-right: 28px;
+            background: var(--controls-bg); padding: 8px 18px;
+            border-radius: 4px 20px 5px 18px;
+            box-shadow: 1px 2px 6px rgba(0,0,0,0.2), inset 0 1px 0 rgba(255,255,255,0.5);
+            border: 1px solid rgba(0,0,0,0.08); font-size: 0.78rem;
+            color: var(--text-color); letter-spacing: 0.04em; font-weight: 600; white-space: nowrap;
+        }
+        .bgm-toggle {
+            cursor: pointer; background: none; border: 1px solid rgba(0,0,0,0.15);
+            border-radius: 50%; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center;
+            font-size: 16px; transition: all 0.25s ease; background: #f5f0e5; color: var(--text-color);
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1); flex-shrink: 0;
+            touch-action: manipulation;
+        }
+        .bgm-toggle:hover { background: #e8e0d0; box-shadow: 0 2px 6px rgba(0,0,0,0.18); }
+        .bgm-toggle.muted { opacity: 0.5; background: #e0d8c8; }
+        .volume-slider {
+            -webkit-appearance: none; width: 70px; height: 6px; border-radius: 3px;
+            background: #d5cbb8; outline: none; cursor: pointer; flex-shrink: 0;
+            touch-action: manipulation;
+        }
+        .volume-slider::-webkit-slider-thumb {
+            -webkit-appearance: none; width: 20px; height: 20px; border-radius: 50%;
+            background: #8b7355; cursor: pointer; border: 2px solid #f0eadc;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.3); transition: transform 0.15s ease;
+        }
+        .volume-label { font-size: 0.7rem; color: #8a7a65; min-width: 22px; text-align: center; flex-shrink: 0; }
+
+        .click-hint {
+            position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); z-index: 30;
+            background: var(--hint-bg); color: var(--text-color); padding: 5px 16px; font-size: 0.7rem;
+            letter-spacing: 0.05em; pointer-events: none; white-space: nowrap;
+            border-radius: 2px 18px 3px 15px;
+            box-shadow: 1px 2px 4px rgba(0,0,0,0.2), inset 0 1px 0 rgba(255,255,255,0.5);
+            text-shadow: 0 1px 0 rgba(255,255,255,0.4); border: 1px solid rgba(0,0,0,0.08);
+            font-weight: 600; transition: background 0.3s, color 0.3s;
+        }
+        .angry-hint { background: #d9c2c2; color: #6b3a3a; }
+
+        .zzz-container {
+            position: absolute; top: 20%; left: 54%; transform: translate(-50%,-50%); z-index: 30;
+            pointer-events: none; opacity: 0; transition: opacity 0.6s ease;
+        }
+        .zzz {
+            position: absolute; color: #a09584; font-size: 36px; font-weight: 900;
+            text-shadow: 0 1px 3px rgba(0,0,0,0.15);
+            animation: zzzFloat var(--zDur) ease-out var(--zDelay) infinite; opacity: 0;
+        }
+        .zzz:nth-child(1) { --zDur:2.2s; --zDelay:0s; left:0; top:0; }
+        .zzz:nth-child(2) { --zDur:2.2s; --zDelay:0.7s; left:18px; top:-12px; }
+        .zzz:nth-child(3) { --zDur:2.2s; --zDelay:1.4s; left:36px; top:-24px; }
+        @keyframes zzzFloat {
+            0%{ transform:translateY(0) scale(0.5) rotate(0deg); opacity:0; }
+            20%{ opacity:0.8; transform:translateY(-8px) scale(1) rotate(5deg); }
+            50%{ opacity:0.6; transform:translateY(-22px) scale(1.3) rotate(-3deg); }
+            100%{ transform:translateY(-40px) scale(0.8) rotate(8deg); opacity:0; }
+        }
+
+        /* ========== 互动消息字卡 ========== */
+        .speech-card {
+            position: absolute;
+            pointer-events: none;
+            z-index: 45;
+            animation: speechAppear 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+            opacity: 0;
+        }
+        .speech-card.dismissing {
+            animation: speechFade 0.6s ease-in forwards;
+        }
+        .speech-card-inner {
+            background: #f0eadc;
+            color: var(--text-color);
+            padding: 5px 13px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+            white-space: nowrap;
+            border-radius: 8px 14px 10px 12px / 12px 8px 14px 10px;
+            box-shadow: 1px 2px 4px rgba(0,0,0,0.22), inset 0 1px 0 rgba(255,255,255,0.55);
+            border: 1px solid rgba(0,0,0,0.06);
+            transform: rotate(var(--rot, 0deg));
+            animation: speechFloat 2s ease-in-out infinite;
+            position: relative;
+        }
+        .speech-card.angry .speech-card-inner {
+            background: #e8d5d5;
+            color: #7a4a4a;
+        }
+        @keyframes speechAppear {
+            0% { transform: scale(0.3); opacity: 0; }
+            60% { transform: scale(1.1); opacity: 1; }
+            100% { transform: scale(1); opacity: 1; }
+        }
+        @keyframes speechFloat {
+            0%, 100% { transform: translateY(0) rotate(var(--rot, 0deg)); }
+            50% { transform: translateY(-3px) rotate(var(--rot, 0deg)); }
+        }
+        @keyframes speechFade {
+            0% { transform: scale(1) translateY(0); opacity: 1; }
+            100% { transform: scale(0.85) translateY(-35px); opacity: 0; }
+        }
+
+        .heart-particle {
+            position: absolute; z-index: 30; pointer-events: none;
+            animation: heartFloat var(--hDur) ease-out var(--hDelay) forwards; opacity:0;
+        }
+        .heart-shape {
+            width: var(--hSize); height: var(--hSize); position: relative;
+            transform: rotate(45deg); background: var(--heart-color);
+            box-shadow: 0 0 6px rgba(0,0,0,0.15);
+        }
+        .heart-shape::before, .heart-shape::after {
+            content: ''; position: absolute; width: var(--hSize); height: var(--hSize);
+            border-radius: 50%; background: var(--heart-color); box-shadow: 0 0 8px rgba(0,0,0,0.1);
+        }
+        .heart-shape::before { left: calc(var(--hSize) * -0.5); }
+        .heart-shape::after { top: calc(var(--hSize) * -0.5); }
+        @keyframes heartFloat {
+            0%{ transform:translate(0,0) scale(0.3) rotate(0deg); opacity:0; }
+            15%{ opacity:1; transform:translate(var(--hDriftX),calc(var(--hRise)*-0.25)) scale(1.1) rotate(var(--hRot)); }
+            45%{ opacity:0.85; transform:translate(calc(var(--hDriftX)*2.5),calc(var(--hRise)*-0.6)) scale(1.4) rotate(calc(var(--hRot)*1.8)); }
+            75%{ opacity:0.4; transform:translate(calc(var(--hDriftX)*4),calc(var(--hRise)*-0.85)) scale(1.1) rotate(calc(var(--hRot)*2.5)); }
+            100%{ transform:translate(calc(var(--hDriftX)*5.5),calc(var(--hRise)*-1.1)) scale(0.6) rotate(calc(var(--hRot)*3.2)); opacity:0; }
+        }
+
+        .angry-symbol {
+            position: absolute; z-index: 30; pointer-events: none;
+            font-size: 36px; font-weight: 900; color: var(--angry-symbol-color);
+            text-shadow: 0 1px 2px rgba(0,0,0,0.1);
+            animation: angrySymbolRise 0.8s ease-out forwards; opacity:0;
+        }
+        @keyframes angrySymbolRise {
+            0%{ transform:translateY(0) scale(0.4) rotate(0deg); opacity:0; }
+            15%{ opacity:1; transform:translateY(-8px) scale(1.2) rotate(-10deg); }
+            50%{ opacity:0.8; transform:translateY(-24px) scale(1) rotate(5deg); }
+            100%{ transform:translateY(-45px) scale(0.5) rotate(15deg); opacity:0; }
+        }
+
+        .fish-snack {
+            position: absolute; z-index: 30; pointer-events: none;
+            transition: left 0.85s cubic-bezier(0.25,0.8,0.25,1), top 0.85s cubic-bezier(0.25,0.8,0.25,1), opacity 0.3s ease;
+            opacity:1; display:flex; align-items:center;
+        }
+        .fish-body {
+            width:22px; height:10px; background:linear-gradient(180deg, #c9a87c, #a6845e);
+            border-radius:50%; position:relative; box-shadow:0 0 6px rgba(0,0,0,0.15);
+        }
+        .fish-body::after {
+            content:''; position:absolute; right:-8px; top:0;
+            width:0; height:0; border-top:5px solid transparent; border-bottom:5px solid transparent;
+            border-left:10px solid #a6845e;
+        }
+        .fish-snack.eaten { opacity:0; transform:scale(0.3); transition:all 0.35s ease-in; }
+        .fish-wiggle { animation:fishWiggle 0.25s ease-in-out infinite; }
+        @keyframes fishWiggle { 0%,100%{ transform:translateY(0); } 50%{ transform:translateY(-3px); } }
+
+        .feed-toast {
+            position: absolute; z-index: 30; pointer-events: none;
+            color: #8a7a65; font-size: 0.8rem; font-weight: 700; letter-spacing: 0.06em;
+            text-shadow: 0 1px 2px rgba(255,255,255,0.5);
+            animation: feedToastFloat 1.6s ease-out forwards; white-space: nowrap;
+        }
+        @keyframes feedToastFloat {
+            0%{ transform:translateY(0) scale(0.6); opacity:0; }
+            20%{ opacity:1; transform:translateY(-20px) scale(1.1); }
+            100%{ transform:translateY(-70px) scale(0.8); opacity:0; }
+        }
+
+        .bubble { fill:var(--bubble-color); filter:drop-shadow(1px 2px 2px rgba(0,0,0,0.15)); pointer-events: none; }
+        .glow-filter { filter:drop-shadow(1px 2px 3px rgba(0,0,0,0.2)); }
+        .glow-filter.jumping-glow { filter:drop-shadow(1px 2px 5px rgba(0,0,0,0.3)); }
+        .glow-filter.angry-glow { filter:drop-shadow(2px 3px 6px rgba(180,80,80,0.4)) drop-shadow(1px 1px 2px rgba(150,50,50,0.2)); }
+
+        .tail-pivot { animation: tailSwing 1.6s ease-in-out infinite; transform-origin: 135px 75px; }
+        @keyframes tailSwing { 0%,100%{ transform:rotate(0deg); } 35%{ transform:rotate(-11deg); } 70%{ transform:rotate(9deg); } }
+        .fin-dorsal-pivot { animation: dorsalWiggle 2.8s ease-in-out infinite; transform-origin: 97px 55px; }
+        @keyframes dorsalWiggle { 0%,100%{ transform:rotate(0deg); } 25%{ transform:rotate(3deg); } 75%{ transform:rotate(-2deg); } }
+        .fin-right-pivot { animation: finRightFlap 2.7s ease-in-out infinite; transform-origin: 118px 135px; }
+        @keyframes finRightFlap { 0%,100%{ transform:rotate(0deg); } 30%{ transform:rotate(13deg); } 65%{ transform:rotate(-8deg); } }
+        .fin-left-pivot { animation: finLeftFlap 2.7s ease-in-out 0.7s infinite; transform-origin: 65px 135px; }
+        @keyframes finLeftFlap { 0%,100%{ transform:rotate(0deg); } 30%{ transform:rotate(-11deg); } 65%{ transform:rotate(10deg); } }
+        .orca-float { animation: floatAndSquash 3.8s ease-in-out infinite; transform-origin: 95px 105px; }
+        @keyframes floatAndSquash {
+            0%,100%{ transform:translateY(0) scaleY(1) scaleX(1); }
+            30%{ transform:translateY(-8px) scaleY(1.03) scaleX(0.98); }
+            60%{ transform:translateY(-2px) scaleY(0.98) scaleX(1.01); }
+            85%{ transform:translateY(-5px) scaleY(1.01) scaleX(0.99); }
+        }
+        .orca-sway { animation: sway 5.5s ease-in-out infinite; transform-origin: 95px 105px; }
+        @keyframes sway { 0%,100%{ transform:rotate(0deg); } 25%{ transform:rotate(2deg); } 50%{ transform:rotate(0.5deg); } 75%{ transform:rotate(-1.5deg); } }
+        .eye-blink { animation: blink 4.5s ease-in-out infinite; transform-origin: 98px 98px; }
+        @keyframes blink { 0%,90%,100%{ transform:scaleY(1); } 95%{ transform:scaleY(0.08); } }
+
+        /* ========== 挣扎动态：拖拽 & 弹飞 ========== */
+
+        /* 拖拽挣扎 - 覆盖浮动动画 */
+        .orca-mouse-layer.is-dragging .orca-float {
+            animation: struggleShake 0.14s ease-in-out infinite !important;
+            transform-origin: 95px 105px;
+        }
+        @keyframes struggleShake {
+            0%,100%{ transform: translateY(0) rotate(0deg) scaleX(1) scaleY(1); }
+            15%{ transform: translateY(-3px) rotate(-5deg) scaleX(0.97) scaleY(1.03); }
+            30%{ transform: translateY(2px) rotate(3deg) scaleX(1.03) scaleY(0.97); }
+            45%{ transform: translateY(-2px) rotate(-3deg) scaleX(0.98) scaleY(1.02); }
+            60%{ transform: translateY(3px) rotate(4deg) scaleX(1.02) scaleY(0.98); }
+            75%{ transform: translateY(-2px) rotate(-2deg) scaleX(0.99) scaleY(1.01); }
+            90%{ transform: translateY(1px) rotate(2deg) scaleX(1.01) scaleY(0.99); }
+        }
+
+        /* 拖拽时眼睛挤压 */
+        .orca-mouse-layer.is-dragging .eye-blink {
+            animation: none !important;
+            transform: scaleY(0.3) scaleX(1.4) !important;
+        }
+
+        /* 拖拽时鱼鳍狂乱扑腾 */
+        .orca-mouse-layer.is-dragging .fin-right-pivot {
+            animation: finPanicRight 0.18s ease-in-out infinite !important;
+            transform-origin: 118px 135px;
+        }
+        @keyframes finPanicRight {
+            0%,100%{ transform: rotate(0deg); }
+            50%{ transform: rotate(22deg); }
+        }
+        .orca-mouse-layer.is-dragging .fin-left-pivot {
+            animation: finPanicLeft 0.18s ease-in-out 0.09s infinite !important;
+            transform-origin: 65px 135px;
+        }
+        @keyframes finPanicLeft {
+            0%,100%{ transform: rotate(0deg); }
+            50%{ transform: rotate(-22deg); }
+        }
+
+        /* 拖拽时尾鳍疯狂摆动 */
+        .orca-mouse-layer.is-dragging .tail-pivot {
+            animation: tailPanic 0.15s ease-in-out infinite !important;
+            transform-origin: 135px 75px;
+        }
+        @keyframes tailPanic {
+            0%,100%{ transform: rotate(0deg); }
+            50%{ transform: rotate(16deg); }
+        }
+
+        /* 弹飞（跳跃）时眼睛挤压 */
+        .orca-jump-layer.jumping .eye-blink,
+        .orca-jump-layer.jumping-feeding .eye-blink {
+            animation: none !important;
+            transform: scaleY(0.4) scaleX(1.3) !important;
+        }
+
+        /* 弹飞时鱼鳍扑腾 */
+        .orca-jump-layer.jumping .fin-right-pivot,
+        .orca-jump-layer.jumping-feeding .fin-right-pivot {
+            animation: finPanicRight 0.2s ease-in-out infinite !important;
+        }
+        .orca-jump-layer.jumping .fin-left-pivot,
+        .orca-jump-layer.jumping-feeding .fin-left-pivot {
+            animation: finPanicLeft 0.2s ease-in-out 0.1s infinite !important;
+        }
+        .orca-jump-layer.jumping .tail-pivot,
+        .orca-jump-layer.jumping-feeding .tail-pivot {
+            animation: tailPanic 0.16s ease-in-out infinite !important;
+        }
+
+        /* 弹飞时身体抖动挣扎（叠加在跳跃动画内层） */
+        .orca-jump-layer.jumping .orca-float {
+            animation: jumpStruggle 0.22s ease-in-out infinite !important;
+        }
+        .orca-jump-layer.jumping-feeding .orca-float {
+            animation: jumpStruggle 0.22s ease-in-out infinite !important;
+        }
+        @keyframes jumpStruggle {
+            0%,100%{ transform: translateY(0) rotate(0deg); }
+            25%{ transform: translateY(-2px) rotate(-2deg); }
+            75%{ transform: translateY(2px) rotate(2deg); }
+        }
+
+        .sleeping .orca-float { animation: floatSlow 6s ease-in-out infinite; }
+        @keyframes floatSlow { 0%,100%{ transform:translateY(0) scaleY(1) scaleX(1); } 50%{ transform:translateY(-3px) scaleY(1.01) scaleX(0.99); } }
+        .sleeping .orca-sway { animation: none; }
+        .sleeping .tail-pivot { animation: tailSwingSlow 3.5s ease-in-out infinite; }
+        @keyframes tailSwingSlow { 0%,100%{ transform:rotate(0deg); } 35%{ transform:rotate(-4deg); } 70%{ transform:rotate(3deg); } }
+        .sleeping .fin-dorsal-pivot, .sleeping .fin-right-pivot, .sleeping .fin-left-pivot { animation: none; }
+        .sleeping .eye-blink { animation: none !important; transform: scaleY(0.08); }
+
+        .orca-mouse-layer { transform-origin: 95px 105px; transition: transform 0.35s ease-out; }
+        .orca-mouse-layer.angry-shake { animation: angryShake 0.12s ease-in-out infinite !important; }
+        @keyframes angryShake {
+            0%,100%{ transform: translateX(0) rotate(0deg); }
+            15%{ transform: translateX(-4px) rotate(-1.5deg); }
+            35%{ transform: translateX(4px) rotate(1.5deg); }
+            55%{ transform: translateX(-3px) rotate(-1deg); }
+            75%{ transform: translateX(3px) rotate(1deg); }
+        }
+
+        .orca-jump-layer { animation: none; transform-origin: 95px 105px; }
+        .orca-jump-layer.jumping { animation: jumpAndSquash 1.25s cubic-bezier(0.34,1.56,0.64,1) forwards; }
+        .orca-jump-layer.jumping-feeding { animation: jumpFeedVertical 1.25s cubic-bezier(0.34,1.56,0.64,1) forwards; }
+        @keyframes jumpAndSquash {
+            0%{ transform:translateY(0) rotate(0deg) scaleX(1) scaleY(1); }
+            18%{ transform:translateY(5px) rotate(-1.5deg) scaleX(1.06) scaleY(0.94); }
+            50%{ transform:translateY(-40px) rotate(3deg) scaleX(0.93) scaleY(1.1); }
+            68%{ transform:translateY(-14px) rotate(1.5deg) scaleX(1.04) scaleY(0.96); }
+            84%{ transform:translateY(6px) rotate(-1deg) scaleX(1.07) scaleY(0.93); }
+            94%{ transform:translateY(-4px) rotate(0.5deg) scaleX(0.98) scaleY(1.03); }
+            100%{ transform:translateY(0) rotate(0deg) scaleX(1) scaleY(1); }
+        }
+        @keyframes jumpFeedVertical {
+            0%{ transform:translateY(0) scaleX(1) scaleY(1); }
+            18%{ transform:translateY(5px) scaleX(1.06) scaleY(0.94); }
+            45%{ transform:translateY(-45px) scaleX(0.94) scaleY(1.1); }
+            60%{ transform:translateY(-20px) scaleX(0.99) scaleY(1.04); }
+            78%{ transform:translateY(5px) scaleX(1.05) scaleY(0.94); }
+            92%{ transform:translateY(-2px) scaleX(0.99) scaleY(1.02); }
+            100%{ transform:translateY(0) scaleX(1) scaleY(1); }
+        }
+        .bubble { animation: bubbleRise var(--dur) ease-in var(--delay) infinite; opacity:0; transition: opacity 0.2s ease; }
+        .bubble.popped { animation: none !important; opacity: 0 !important; }
+        @keyframes bubbleRise {
+            0%{ transform:translateY(0) translateX(0) scale(1); opacity:0; }
+            8%{ opacity:0.6; }
+            40%{ opacity:0.4; transform:translateY(calc(var(--rise) * -0.4)) translateX(var(--drift)) scale(1.1); }
+            75%{ opacity:0.15; transform:translateY(calc(var(--rise) * -0.75)) translateX(calc(var(--drift) * 1.8)) scale(0.9); }
+            100%{ transform:translateY(calc(var(--rise) * -1)) translateX(calc(var(--drift) * 2.5)) scale(0.6); opacity:0; }
+        }
+
+        /* ========== 海底信箱 · 留言板 ========== */
+        .board-trigger {
+            cursor: pointer; background: #f5f0e5; color: var(--text-color);
+            border: 1px solid rgba(0,0,0,0.15); border-radius: 50%;
+            width: 32px; height: 32px; display: flex; align-items: center; justify-content: center;
+            font-size: 15px; transition: all 0.25s ease; flex-shrink: 0;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1); touch-action: manipulation;
+            position: relative;
+        }
+        .board-trigger:hover { background: #e8e0d0; box-shadow: 0 2px 6px rgba(0,0,0,0.18); }
+        .board-trigger:active { transform: scale(0.94); }
+
+        .board-scrim {
+            position: fixed; inset: 0; background: rgba(28,22,14,0.42);
+            -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px);
+            opacity: 0; pointer-events: none; transition: opacity 0.34s ease; z-index: 200;
+        }
+        .board-scrim.open { opacity: 1; pointer-events: auto; }
+
+        .board-drawer {
+            position: fixed; left: 0; right: 0; bottom: 0;
+            display: flex; justify-content: center;
+            transform: translateY(104%);
+            transition: transform 0.44s cubic-bezier(0.22, 1, 0.36, 1);
+            z-index: 210; pointer-events: none;
+        }
+        .board-drawer.open { transform: translateY(0); pointer-events: auto; }
+
+        .board-sheet {
+            width: 100%; max-width: 560px; max-height: 80vh;
+            display: flex; flex-direction: column;
+            background: linear-gradient(180deg, #f8f3ea 0%, var(--paper-bg) 100%);
+            border-radius: 26px 26px 0 0;
+            box-shadow: 0 -10px 36px rgba(0,0,0,0.38), inset 0 1px 0 rgba(255,255,255,0.75);
+            border-top: 3px solid var(--wood-light);
+            padding: 14px 16px calc(12px + env(safe-area-inset-bottom, 0px));
+            position: relative; overflow: hidden;
+        }
+        .board-sheet::after {
+            content: ''; position: absolute; left: 0; right: 0; top: 0; height: 3px;
+            z-index: 3; pointer-events: none;
+            background: repeating-linear-gradient(90deg,
+                rgba(120,98,68,0.28) 0 7px,
+                rgba(120,98,68,0.02) 7px 14px);
+            opacity: 0.75;
+        }
+        .board-sheet::before {
+            content: ''; position: absolute; inset: 0; pointer-events: none;
+            opacity: 0.28; mix-blend-mode: multiply; z-index: 0;
+            background: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n2'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n2)' opacity='0.32'/%3E%3C/svg%3E");
+        }
+        .board-sheet > * { position: relative; z-index: 1; }
+
+        .board-head {
+            display: flex; align-items: flex-start; justify-content: space-between;
+            gap: 10px; padding-bottom: 10px; flex-shrink: 0;
+            border-bottom: 1px dashed rgba(120,100,70,0.28);
+        }
+        .board-title { display: flex; flex-direction: column; gap: 2px; }
+        .board-title-cn {
+            font-size: 1.02rem; font-weight: 700; color: var(--paper-dark);
+            letter-spacing: 0.08em;
+        }
+        .board-title-sub { font-size: 0.66rem; color: #9a8a72; letter-spacing: 0.03em; }
+        .board-close {
+            cursor: pointer; background: #efe8db; border: 1px solid rgba(0,0,0,0.1);
+            border-radius: 50%; width: 28px; height: 28px; flex-shrink: 0;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 13px; color: #7a6a55; transition: all 0.2s ease;
+            touch-action: manipulation;
+        }
+        .board-close:hover { background: #e2d8c6; color: #4a3e2e; }
+
+        .board-form { display: flex; flex-direction: column; gap: 7px; padding: 11px 0 8px; flex-shrink: 0; position: relative; }
+        .board-nick, .board-text {
+            width: 100%; font-family: inherit; color: var(--text-color);
+            background: linear-gradient(180deg, #fbf6ec 0%, #fefcf6 42%, #fdf9f0 100%);
+            border: 1px solid rgba(140,118,88,0.26);
+            border-radius: 4px 12px 5px 11px / 11px 4px 12px 5px;
+            padding: 8px 11px; font-size: 16px; outline: none;
+            box-shadow:
+                inset 0 2px 4px rgba(120,100,70,0.10),
+                inset 0 -1px 0 rgba(255,255,255,0.85),
+                0 1px 0 rgba(255,255,255,0.7);
+            -webkit-user-select: text; user-select: text;
+            transition: border-color 0.2s ease, box-shadow 0.2s ease;
+        }
+        .board-nick::placeholder, .board-text::placeholder { color: #b3a68f; }
+        .board-nick:focus, .board-text:focus {
+            border-color: var(--wood-light);
+            box-shadow: inset 0 1px 2px rgba(0,0,0,0.04), 0 0 0 3px rgba(139,115,85,0.13);
+        }
+        .board-text { resize: none; line-height: 1.5; min-height: 64px; max-height: 110px; }
+        .board-form-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+        .board-count { font-size: 0.64rem; color: #a89880; letter-spacing: 0.04em; }
+        .board-count.warn { color: #c07a6a; }
+        .board-send {
+            cursor: pointer; border: none; font-family: inherit;
+            background: linear-gradient(135deg, #8b7355 0%, #6d573d 100%);
+            color: #f8f3e8; font-size: 0.74rem; font-weight: 700;
+            letter-spacing: 0.06em; padding: 8px 18px;
+            border-radius: 5px 14px 6px 13px / 13px 5px 14px 6px;
+            box-shadow:
+                0 1px 2px rgba(60,44,26,0.28),
+                0 3px 8px rgba(60,44,26,0.22),
+                inset 0 1px 0 rgba(255,255,255,0.26),
+                inset 0 -1px 0 rgba(0,0,0,0.14);
+            transition: all 0.2s ease; touch-action: manipulation;
+        }
+        .board-send:hover:not(:disabled) { filter: brightness(1.08); transform: translateY(-1px); }
+        .board-send:active:not(:disabled) { transform: translateY(0) scale(0.98); }
+        .board-send:disabled { opacity: 0.55; cursor: not-allowed; transform: none; }
+
+        .board-status {
+            font-size: 0.66rem; color: #8a7a65; letter-spacing: 0.03em;
+            min-height: 15px; padding: 0 2px 4px; flex-shrink: 0;
+        }
+        .board-status.error { color: #b5695a; }
+        .board-status.ok { color: #6b8a63; }
+
+        .board-list {
+            flex: 1 1 auto; overflow-y: auto; overflow-x: hidden;
+            display: flex; flex-direction: column; gap: 9px;
+            padding: 4px 2px 8px; min-height: 90px;
+            scrollbar-width: thin; scrollbar-color: #cbbfa8 transparent;
+            -webkit-overflow-scrolling: touch;
+        }
+        .board-list::-webkit-scrollbar { width: 5px; }
+        .board-list::-webkit-scrollbar-thumb { background: #cbbfa8; border-radius: 3px; }
+        .board-list::-webkit-scrollbar-track { background: transparent; }
+
+        .board-card {
+            position: relative;
+            background: linear-gradient(168deg, #fdfaf2 0%, #f7f1e4 62%, #f2ebdb 100%);
+            border-radius: 6px 14px 8px 12px / 12px 6px 14px 8px;
+            padding: 9px 12px 10px;
+            box-shadow:
+                0 1px 2px rgba(90,70,40,0.10),
+                0 3px 7px rgba(90,70,40,0.09),
+                0 7px 16px rgba(90,70,40,0.06),
+                inset 0 1px 0 rgba(255,255,255,0.92),
+                inset 0 -1px 0 rgba(120,100,70,0.06);
+            border: 1px solid rgba(140,118,88,0.14);
+            transform: rotate(var(--rot, 0deg));
+            animation: boardCardIn 0.4s ease backwards;
+            overflow: hidden;
+        }
+        .board-card::before {
+            content: ''; position: absolute; inset: 0; pointer-events: none;
+            opacity: 0.22; mix-blend-mode: multiply; z-index: 0;
+            background: url("data:image/svg+xml,%3Csvg viewBox='0 0 160 160' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='cg'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23cg)' opacity='0.42'/%3E%3C/svg%3E");
+        }
+        .board-card > * { position: relative; z-index: 1; }
+        @keyframes boardCardIn {
+            from { opacity: 0; transform: translateY(8px) rotate(var(--rot, 0deg)); }
+            to   { opacity: 1; transform: translateY(0) rotate(var(--rot, 0deg)); }
+        }
+        .board-card-head {
+            display: flex; align-items: baseline; justify-content: space-between;
+            gap: 8px; margin-bottom: 4px;
+        }
+        .board-card-nick {
+            font-size: 0.7rem; font-weight: 700; color: #6d573d;
+            letter-spacing: 0.04em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .board-card-time { font-size: 0.6rem; color: #b3a68f; flex-shrink: 0; letter-spacing: 0.02em; }
+        .board-card-text {
+            font-size: 0.76rem; color: var(--text-color); line-height: 1.55;
+            white-space: pre-wrap; word-break: break-word;
+        }
+
+        .board-empty {
+            text-align: center; color: #b3a68f; font-size: 0.72rem;
+            padding: 26px 10px; letter-spacing: 0.05em; line-height: 1.8;
+        }
+        .board-empty-emoji { font-size: 1.6rem; display: block; margin-bottom: 6px; opacity: 0.75; }
+
+        .board-pager {
+            display: flex; align-items: center; justify-content: center; gap: 14px;
+            padding-top: 9px; flex-shrink: 0;
+            border-top: 1px dashed rgba(120,100,70,0.28);
+        }
+        .board-page-btn {
+            cursor: pointer; font-family: inherit; font-size: 0.68rem;
+            background: #efe8db; color: #7a6a55;
+            border: 1px solid rgba(0,0,0,0.09); border-radius: 4px 10px 5px 9px / 9px 4px 10px 5px;
+            padding: 5px 12px; transition: all 0.2s ease; touch-action: manipulation;
+        }
+        .board-page-btn:hover:not(:disabled) { background: #e2d8c6; color: #4a3e2e; }
+        .board-page-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+        .board-page-info { font-size: 0.66rem; color: #9a8a72; letter-spacing: 0.06em; min-width: 46px; text-align: center; }
+
+        @media (max-width: 420px) {
+            .board-sheet { max-height: 84vh; padding: 12px 13px calc(10px + env(safe-area-inset-bottom, 0px)); }
+            .board-title-cn { font-size: 0.95rem; }
+        }
+
+        /* ========== 相框右下角 · 纸雕信封入口 ========== */
+        .board-envelope {
+            position: absolute; right: 8px; bottom: 12px; z-index: 6;
+            display: flex; align-items: center; gap: 5px;
+            cursor: pointer; user-select: none; touch-action: manipulation;
+            background: linear-gradient(160deg, #fdfaf2 0%, #f6efe0 55%, #efe6d3 100%);
+            color: #5a4328; font-family: inherit;
+            padding: 5px 9px 5px 8px;
+            border-radius: 4px 13px 5px 12px / 12px 5px 13px 4px;
+            border: 1px solid rgba(140,118,88,0.34);
+            box-shadow:
+                0 2px 4px rgba(60,44,26,0.22),
+                0 5px 12px rgba(60,44,26,0.18),
+                inset 0 1px 0 rgba(255,255,255,0.92),
+                inset 0 -1px 0 rgba(120,100,70,0.10);
+            transition: transform 0.22s ease, box-shadow 0.22s ease, filter 0.22s ease;
+            overflow: hidden;
+        }
+        .board-envelope::before {
+            content: ''; position: absolute; inset: 0; pointer-events: none;
+            opacity: 0.20; mix-blend-mode: multiply;
+            background: url("data:image/svg+xml,%3Csvg viewBox='0 0 160 160' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='eg'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23eg)' opacity='0.42'/%3E%3C/svg%3E");
+        }
+        .board-envelope:hover { transform: translateY(-2px) rotate(-1deg); filter: brightness(1.03);
+            box-shadow: 0 4px 8px rgba(60,44,26,0.26), 0 9px 18px rgba(60,44,26,0.2),
+                inset 0 1px 0 rgba(255,255,255,0.92); }
+        .board-envelope:active { transform: translateY(0) scale(0.97); }
+        .board-envelope .env-ico {
+            width: 20px; height: 15px; flex-shrink: 0; position: relative; z-index: 1;
+            background: #f3ead8; border: 1.5px solid #8a7350; border-radius: 2px;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.7);
+        }
+        .board-envelope .env-ico::before {
+            content: ''; position: absolute; left: -1.5px; right: -1.5px; top: 0; height: 0;
+            border-left: 11px solid transparent; border-right: 11px solid transparent;
+            border-top: 8.5px solid #cdb892;
+            filter: drop-shadow(0 1px 1px rgba(0,0,0,0.12));
+        }
+        .board-envelope .env-label {
+            position: relative; z-index: 1;
+            font-size: 0.78rem; font-weight: 700; letter-spacing: 0.1em;
+            color: #5a4328; text-shadow: 0 1px 0 rgba(255,255,255,0.6);
+        }
+        @media (max-width: 420px) {
+            .board-envelope { right: 6px; bottom: 10px; padding: 5px 8px 5px 7px; }
+            .board-envelope .env-label { font-size: 0.74rem; }
+        }
+    </style>
+</head>
+<body>
+<div class="frame">
+    <div class="scene-wrapper" id="sceneWrapper">
+        <div class="ocean-scene" id="oceanScene">
+            <div class="paper-texture"></div>
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 190 190" width="190" height="190">
+                <defs>
+                    <filter id="paperShadow" x="-10%" y="-10%" width="130%" height="130%">
+                        <feDropShadow dx="1.5" dy="2" stdDeviation="2.5" flood-color="#000" flood-opacity="0.25"/>
+                    </filter>
+                    <filter id="thickEdge" x="-5%" y="-5%" width="115%" height="115%">
+                        <feDropShadow dx="0.5" dy="1" stdDeviation="0.5" flood-color="#000" flood-opacity="0.15"/>
+                    </filter>
+                    <filter id="sandShadow" x="-10%" y="-10%" width="120%" height="120%">
+                        <feDropShadow dx="1" dy="1.5" stdDeviation="1.5" flood-color="#000" flood-opacity="0.2"/>
+                    </filter>
+                    <linearGradient id="lightRay" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stop-color="#faf7f0" stop-opacity="0.25"/>
+                        <stop offset="60%" stop-color="#e0dcd0" stop-opacity="0.1"/>
+                        <stop offset="100%" stop-color="#c8c0b0" stop-opacity="0"/>
+                    </linearGradient>
+                    <radialGradient id="bubbleGrad" cx="35%" cy="35%" r="50%">
+                        <stop offset="0%" stop-color="#fffef9" stop-opacity="0.9"/>
+                        <stop offset="50%" stop-color="#e8e2d5" stop-opacity="0.45"/>
+                        <stop offset="100%" stop-color="#c5bbaa" stop-opacity="0.1"/>
+                    </radialGradient>
+                    <linearGradient id="sandGrad" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stop-color="#d4b896"/>
+                        <stop offset="60%" stop-color="#c4a882"/>
+                        <stop offset="100%" stop-color="#b09870"/>
+                    </linearGradient>
+                </defs>
+
+                <polygon class="light-beam" points="50,-5 80,-5 35,140 10,140" fill="url(#lightRay)" opacity="0.4"/>
+                <polygon class="light-beam" points="100,-5 125,-5 90,150 55,150" fill="url(#lightRay)" opacity="0.3"/>
+                <ellipse cx="80" cy="60" rx="30" ry="12" fill="#e0dac8" opacity="0.08"/>
+                <circle cx="45" cy="55" r="1.2" fill="#b8aa90" opacity="0.5"/>
+                <circle cx="150" cy="40" r="0.9" fill="#c0b29a" opacity="0.4"/>
+
+                <g filter="url(#sandShadow)">
+                    <path d="M 0 152 C 15 148, 30 150, 45 153 C 60 156, 72 149, 88 151 C 104 153, 115 147, 130 150 C 145 153, 160 148, 175 151 C 185 153, 190 152, 190 155 L 190 190 L 0 190 Z" fill="#b09870" stroke="none"/>
+                    <path d="M 0 155 C 18 151, 35 153, 50 156 C 68 159, 80 152, 95 154 C 112 156, 125 150, 140 153 C 158 156, 170 151, 185 153 C 190 154, 190 155, 190 157 L 190 190 L 0 190 Z" fill="url(#sandGrad)" stroke="none"/>
+                    <circle cx="20" cy="165" r="1.5" fill="#bfa580" opacity="0.5"/>
+                    <circle cx="55" cy="172" r="1.2" fill="#c9b08a" opacity="0.45"/>
+                    <circle cx="90" cy="168" r="1.8" fill="#bfa580" opacity="0.4"/>
+                    <circle cx="130" cy="175" r="1.3" fill="#c9b08a" opacity="0.5"/>
+                    <circle cx="165" cy="170" r="1.6" fill="#bfa580" opacity="0.45"/>
+                    <circle cx="35" cy="178" r="1.1" fill="#c9b08a" opacity="0.4"/>
+                    <circle cx="105" cy="180" r="1.4" fill="#bfa580" opacity="0.5"/>
+                    <circle cx="150" cy="165" r="1.0" fill="#c9b08a" opacity="0.4"/>
+                </g>
+
+                <g filter="url(#sandShadow)">
+                    <ellipse cx="28" cy="162" rx="6" ry="8" fill="#d4956b" stroke="none"/>
+                    <ellipse cx="24" cy="158" rx="5" ry="7" fill="#c87d7d" stroke="none"/>
+                    <ellipse cx="32" cy="159" rx="4.5" ry="6.5" fill="#d4956b" stroke="none"/>
+                    <circle cx="22" cy="154" r="3" fill="#e0a080" stroke="none"/>
+                    <circle cx="30" cy="155" r="2.5" fill="#d4956b" stroke="none"/>
+                    <circle cx="34" cy="156" r="2.8" fill="#c87d7d" stroke="none"/>
+                </g>
+
+                <g filter="url(#sandShadow)">
+                    <ellipse cx="162" cy="160" rx="5" ry="9" fill="#c87d7d" stroke="none"/>
+                    <ellipse cx="158" cy="156" rx="4" ry="7" fill="#d4956b" stroke="none"/>
+                    <ellipse cx="166" cy="157" rx="4.5" ry="6" fill="#c87d7d" stroke="none"/>
+                    <circle cx="156" cy="152" r="2.5" fill="#e0a080" stroke="none"/>
+                    <circle cx="164" cy="153" r="2.2" fill="#d4956b" stroke="none"/>
+                    <circle cx="168" cy="154" r="2.6" fill="#c87d7d" stroke="none"/>
+                </g>
+
+                <g filter="url(#sandShadow)">
+                    <ellipse cx="100" cy="164" rx="3.5" ry="5" fill="#d4956b" stroke="none"/>
+                    <circle cx="98" cy="160" r="2" fill="#c87d7d" stroke="none"/>
+                    <circle cx="103" cy="161" r="2.2" fill="#e0a080" stroke="none"/>
+                </g>
+
+                <g filter="url(#sandShadow)">
+                    <ellipse cx="42" cy="168" rx="4" ry="2.5" fill="#c8b896" stroke="none"/>
+                    <ellipse cx="112" cy="170" rx="3" ry="2" fill="#d0c0a0" stroke="none"/>
+                    <ellipse cx="155" cy="167" rx="3.5" ry="2.2" fill="#c8b896" stroke="none"/>
+                </g>
+
+                <g filter="url(#paperShadow)">
+                    <g id="orcaGlowGroup">
+                        <g id="orcaDragLayer">
+                            <g class="orca-jump-layer" id="orcaJumpLayer">
+                                <g class="orca-mouse-layer" id="orcaMouseLayer">
+                                    <g class="orca-float">
+                                        <g class="orca-sway">
+                                            <g class="tail-pivot" filter="url(#thickEdge)">
+                                                <g transform="translate(135,65) scale(-0.7,0.7) translate(-174,-76)">
+                                                    <path d="M 150.00 54.00 C 151.33 52.67, 153.17 54.83, 154.00 56.00 C 154.83 57.17, 153.17 59.00, 155.00 61.00 C 156.83 63.00, 162.17 65.34, 165.00 68.00 C 167.83 70.66, 169.50 76.33, 172.00 77.00 C 174.50 77.67, 176.50 73.00, 180.00 72.00 C 183.50 71.00, 190.00 72.17, 193.00 71.00 C 196.00 69.83, 196.50 66.00, 198.00 65.00 C 199.50 64.00, 201.33 63.34, 202.00 65.00 C 202.67 66.67, 202.83 71.34, 202.00 75.00 C 201.17 78.66, 199.33 83.67, 197.00 87.00 C 194.67 90.33, 191.16 93.17, 188.00 95.00 C 184.84 96.83, 183.00 98.17, 178.00 98.00 C 173.00 97.83, 162.50 95.83, 158.00 94.00 C 153.50 92.17, 153.00 90.16, 151.00 87.00 C 149.00 83.84, 146.83 78.83, 146.00 75.00 C 145.17 71.17, 145.33 67.50, 146.00 64.00 C 146.67 60.50, 148.67 55.33, 150.00 54.00 Z" fill="var(--orca-shadow)" stroke="none" pointer-events="none" transform="translate(1,1)"/>
+                                                </g>
+                                            </g>
+                                            <g class="tail-pivot">
+                                                <g transform="translate(135,65) scale(-0.7,0.7) translate(-174,-76)">
+                                                    <path d="M 150.00 54.00 C 151.33 52.67, 153.17 54.83, 154.00 56.00 C 154.83 57.17, 153.17 59.00, 155.00 61.00 C 156.83 63.00, 162.17 65.34, 165.00 68.00 C 167.83 70.66, 169.50 76.33, 172.00 77.00 C 174.50 77.67, 176.50 73.00, 180.00 72.00 C 183.50 71.00, 190.00 72.17, 193.00 71.00 C 196.00 69.83, 196.50 66.00, 198.00 65.00 C 199.50 64.00, 201.33 63.34, 202.00 65.00 C 202.67 66.67, 202.83 71.34, 202.00 75.00 C 201.17 78.66, 199.33 83.67, 197.00 87.00 C 194.67 90.33, 191.16 93.17, 188.00 95.00 C 184.84 96.83, 183.00 98.17, 178.00 98.00 C 173.00 97.83, 162.50 95.83, 158.00 94.00 C 153.50 92.17, 153.00 90.16, 151.00 87.00 C 149.00 83.84, 146.83 78.83, 146.00 75.00 C 145.17 71.17, 145.33 67.50, 146.00 64.00 C 146.67 60.50, 148.67 55.33, 150.00 54.00 Z" fill="var(--orca-body)" stroke="none" pointer-events="none"/>
+                                                </g>
+                                            </g>
+                                            <path d="M 144.00 80.00 C 144.67 84.83, 143.00 95.34, 141.00 102.00 C 139.00 108.66, 136.50 113.84, 132.00 120.00 C 127.50 126.16, 119.66 134.34, 114.00 139.00 C 108.34 143.66, 103.49 146.17, 98.00 148.00 C 92.51 149.83, 87.83 150.83, 81.00 150.00 C 74.17 149.17, 63.83 146.66, 57.00 143.00 C 50.17 139.34, 44.50 134.16, 40.00 128.00 C 35.50 121.84, 31.83 113.16, 30.00 106.00 C 28.17 98.84, 28.17 90.99, 29.00 85.00 C 29.83 79.01, 32.17 74.50, 35.00 70.00 C 37.83 65.50, 41.67 61.00, 46.00 58.00 C 50.33 55.00, 56.01 53.00, 61.00 52.00 C 66.00 51.00, 70.51 51.00, 76.00 52.00 C 81.49 53.00, 85.34 52.34, 94.00 58.00 C 102.66 63.66, 120.84 83.50, 128.00 86.00 C 135.16 88.50, 134.34 74.00, 137.00 73.00 C 139.66 72.00, 143.33 75.17, 144.00 80.00 Z" fill="var(--orca-shadow)" stroke="none" pointer-events="none" transform="translate(1.5,2)"/>
+                                            <path d="M 144.00 80.00 C 144.67 84.83, 143.00 95.34, 141.00 102.00 C 139.00 108.66, 136.50 113.84, 132.00 120.00 C 127.50 126.16, 119.66 134.34, 114.00 139.00 C 108.34 143.66, 103.49 146.17, 98.00 148.00 C 92.51 149.83, 87.83 150.83, 81.00 150.00 C 74.17 149.17, 63.83 146.66, 57.00 143.00 C 50.17 139.34, 44.50 134.16, 40.00 128.00 C 35.50 121.84, 31.83 113.16, 30.00 106.00 C 28.17 98.84, 28.17 90.99, 29.00 85.00 C 29.83 79.01, 32.17 74.50, 35.00 70.00 C 37.83 65.50, 41.67 61.00, 46.00 58.00 C 50.33 55.00, 56.01 53.00, 61.00 52.00 C 66.00 51.00, 70.51 51.00, 76.00 52.00 C 81.49 53.00, 85.34 52.34, 94.00 58.00 C 102.66 63.66, 120.84 83.50, 128.00 86.00 C 135.16 88.50, 134.34 74.00, 137.00 73.00 C 139.66 72.00, 143.33 75.17, 144.00 80.00 Z" fill="var(--orca-body)" stroke="none" pointer-events="none"/>
+                                            <g class="fin-dorsal-pivot">
+                                                <path d="M 102.00 48.00 C 102.00 49.33, 97.50 53.00, 97.00 55.00 C 96.50 57.00, 101.83 60.33, 99.00 60.00 C 96.17 59.67, 82.16 54.83, 80.00 53.00 C 77.84 51.17, 83.17 50.00, 86.00 49.00 C 88.83 48.00, 94.34 47.17, 97.00 47.00 C 99.66 46.83, 102.00 46.67, 102.00 48.00 Z" fill="var(--orca-body)" stroke="none" transform="translate(2,5)" pointer-events="none"/>
+                                            </g>
+                                            <path d="M 146.00 127.00 C 144.34 128.00, 138.50 129.50, 136.00 129.00 C 133.50 128.50, 131.83 126.33, 131.00 124.00 C 130.17 121.67, 131.67 117.16, 131.00 115.00 C 130.33 112.84, 128.33 111.67, 127.00 111.00 C 125.67 110.33, 124.00 111.33, 123.00 111.00 C 122.00 110.67, 121.17 109.83, 121.00 109.00 C 120.83 108.17, 120.50 106.67, 122.00 106.00 C 123.50 105.33, 127.84 104.67, 130.00 105.00 C 132.16 105.33, 133.00 106.17, 135.00 108.00 C 137.00 109.83, 140.17 113.50, 142.00 116.00 C 143.83 118.50, 145.33 121.17, 146.00 123.00 C 146.67 124.83, 147.66 126.00, 146.00 127.00 Z" fill="#c8bfb0" stroke="none" transform="translate(-25,-19)"/>
+                                            <path d="M 146.00 127.00 C 144.34 128.00, 138.50 129.50, 136.00 129.00 C 133.50 128.50, 131.83 126.33, 131.00 124.00 C 130.17 121.67, 131.67 117.16, 131.00 115.00 C 130.33 112.84, 128.33 111.67, 127.00 111.00 C 125.67 110.33, 124.00 111.33, 123.00 111.00 C 122.00 110.67, 121.17 109.83, 121.00 109.00 C 120.83 108.17, 120.50 106.67, 122.00 106.00 C 123.50 105.33, 127.84 104.67, 130.00 105.00 C 132.16 105.33, 133.00 106.17, 135.00 108.00 C 137.00 109.83, 140.17 113.50, 142.00 116.00 C 143.83 118.50, 145.33 121.17, 146.00 123.00 C 146.67 124.83, 147.66 126.00, 146.00 127.00 Z" fill="var(--orca-belly)" stroke="none" transform="translate(-26,-20)" pointer-events="none"/>
+                                            <g class="eye-blink" pointer-events="none">
+                                                <circle cx="98" cy="98" r="2.63" fill="#e8e0d5" stroke="none"/>
+                                            </g>
+                                            <path d="M 118.00 145.00 C 118.00 146.83, 111.49 147.00, 105.00 144.00 C 98.51 141.00, 83.83 129.33, 79.00 127.00 C 74.17 124.67, 76.00 127.67, 76.00 130.00 C 76.00 132.33, 81.00 139.67, 79.00 141.00 C 77.00 142.33, 68.33 140.16, 64.00 138.00 C 59.67 135.84, 56.33 132.16, 53.00 128.00 C 49.67 123.84, 46.16 119.49, 44.00 113.00 C 41.84 106.51, 37.84 93.16, 40.00 89.00 C 42.16 84.84, 50.01 86.00, 57.00 88.00 C 63.99 90.00, 74.01 93.51, 82.00 101.00 C 89.99 108.49, 99.01 125.67, 105.00 133.00 C 110.99 140.33, 118.00 143.17, 118.00 145.00 Z" fill="#c8bfb0" stroke="none" transform="translate(70,113) scale(0.9) translate(-79,-117)"/>
+                                            <path d="M 118.00 145.00 C 118.00 146.83, 111.49 147.00, 105.00 144.00 C 98.51 141.00, 83.83 129.33, 79.00 127.00 C 74.17 124.67, 76.00 127.67, 76.00 130.00 C 76.00 132.33, 81.00 139.67, 79.00 141.00 C 77.00 142.33, 68.33 140.16, 64.00 138.00 C 59.67 135.84, 56.33 132.16, 53.00 128.00 C 49.67 123.84, 46.16 119.49, 44.00 113.00 C 41.84 106.51, 37.84 93.16, 40.00 89.00 C 42.16 84.84, 50.01 86.00, 57.00 88.00 C 63.99 90.00, 74.01 93.51, 82.00 101.00 C 89.99 108.49, 99.01 125.67, 105.00 133.00 C 110.99 140.33, 118.00 143.17, 118.00 145.00 Z" fill="var(--orca-belly)" stroke="none" transform="translate(69,112) scale(0.9) translate(-79,-117)" pointer-events="none"/>
+                                            <g class="fin-right-pivot" filter="url(#thickEdge)">
+                                                <g transform="translate(26,31)"><path d="M 109.00 109.00 C 109.17 111.00, 97.16 112.00, 93.00 111.00 C 88.84 110.00, 84.17 105.00, 84.00 103.00 C 83.83 101.00, 87.84 98.00, 92.00 99.00 C 96.16 100.00, 108.83 107.00, 109.00 109.00 Z" fill="var(--orca-shadow)" stroke="none"/></g>
+                                            </g>
+                                            <g class="fin-right-pivot">
+                                                <g transform="translate(25,30)"><path d="M 109.00 109.00 C 109.17 111.00, 97.16 112.00, 93.00 111.00 C 88.84 110.00, 84.17 105.00, 84.00 103.00 C 83.83 101.00, 87.84 98.00, 92.00 99.00 C 96.16 100.00, 108.83 107.00, 109.00 109.00 Z" fill="var(--orca-body)" stroke="none"/></g>
+                                            </g>
+                                            <g class="fin-left-pivot" filter="url(#thickEdge)">
+                                                <g transform="translate(134,31) scale(-1,1)"><path d="M 109.00 109.00 C 109.17 111.00, 97.16 112.00, 93.00 111.00 C 88.84 110.00, 84.17 105.00, 84.00 103.00 C 83.83 101.00, 87.84 98.00, 92.00 99.00 C 96.16 100.00, 108.83 107.00, 109.00 109.00 Z" fill="var(--orca-shadow)" stroke="none"/></g>
+                                            </g>
+                                            <g class="fin-left-pivot">
+                                                <g transform="translate(135,30) scale(-1,1)"><path d="M 109.00 109.00 C 109.17 111.00, 97.16 112.00, 93.00 111.00 C 88.84 110.00, 84.17 105.00, 84.00 103.00 C 83.83 101.00, 87.84 98.00, 92.00 99.00 C 96.16 100.00, 108.83 107.00, 109.00 109.00 Z" fill="var(--orca-body)" stroke="none"/></g>
+                                            </g>
+                                        </g>
+                                    </g>
+                                </g>
+                            </g>
+                        </g>
+                    </g>
+                </g>
+
+                <circle class="bubble" cx="94" cy="50" r="3.2" fill="url(#bubbleGrad)" style="--dur:3.2s;--delay:0s;--rise:55px;--drift:-8px;" data-bubble="0"/>
+                <circle class="bubble" cx="96" cy="52" r="2.5" fill="url(#bubbleGrad)" style="--dur:3.8s;--delay:0.6s;--rise:60px;--drift:5px;" data-bubble="1"/>
+                <circle class="bubble" cx="91" cy="49" r="2.0" fill="url(#bubbleGrad)" style="--dur:3.5s;--delay:1.3s;--rise:50px;--drift:-4px;" data-bubble="2"/>
+                <circle class="bubble" cx="108" cy="60" r="1.8" fill="url(#bubbleGrad)" style="--dur:4.2s;--delay:2.1s;--rise:65px;--drift:10px;" data-bubble="3"/>
+                <circle class="bubble" cx="88" cy="55" r="2.8" fill="url(#bubbleGrad)" style="--dur:3.6s;--delay:2.8s;--rise:48px;--drift:-6px;" data-bubble="4"/>
+                <circle class="bubble" cx="42" cy="100" r="1.5" fill="url(#bubbleGrad)" style="--dur:4.5s;--delay:1.8s;--rise:70px;--drift:12px;" data-bubble="5"/>
+                <circle class="bubble" cx="95" cy="48" r="2.2" fill="url(#bubbleGrad)" style="--dur:3.9s;--delay:3.4s;--rise:52px;--drift:3px;" data-bubble="6"/>
+            </svg>
+        </div>
+        <div class="click-hint" id="clickHint">🐋 身体弹跳 · 背鳍爱心 · 腹部喂食 · 连戳尾鳍生气</div>
+        <div class="zzz-container" id="zzzContainer">
+            <div class="zzz">Z</div><div class="zzz">z</div><div class="zzz">z</div>
+        </div>
+    </div>
+
+    <div class="controls-bar" id="controlsBar">
+        <button class="bgm-toggle" id="bgmToggle" title="背景音乐开关">🎵</button>
+        <span style="font-size:0.68rem;color:#8a7a65;">音量</span>
+        <input type="range" class="volume-slider" id="volumeSlider" min="0" max="100" value="60" title="音量调节"/>
+        <span class="volume-label" id="volumeLabel">60%</span>
+        <button class="board-trigger" id="boardTrigger" type="button" title="海底信箱">💌</button>
+    </div>
+    <button class="board-envelope" id="boardEnvelope" type="button" aria-label="留言" title="写封给虎鲸的信">
+        <span class="env-ico" aria-hidden="true"></span>
+        <span class="env-label">留言</span>
+    </button>
+
+</div>
+
+<div class="board-scrim" id="boardScrim"></div>
+<div class="board-drawer" id="boardDrawer" role="dialog" aria-modal="true" aria-labelledby="boardTitle">
+    <div class="board-sheet">
+        <div class="board-head">
+            <div class="board-title">
+                <span class="board-title-cn" id="boardTitle">海底信箱</span>
+                <span class="board-title-sub">写给虎鲸的话，会漂到这里</span>
+            </div>
+            <button class="board-close" id="boardClose" type="button" aria-label="关闭">✕</button>
+        </div>
+
+        <form class="board-form" id="boardForm" autocomplete="off">
+            <input class="board-nick" id="boardNick" type="text" maxlength="16" placeholder="昵称（不填就叫匿名鲸鱼）" />
+            <textarea class="board-text" id="boardText" maxlength="200" rows="3" placeholder="今天想对虎鲸说什么…"></textarea>
+            <div class="board-form-foot">
+                <span class="board-count" id="boardCount">0 / 200</span>
+                <button class="board-send" id="boardSend" type="submit">✎ 投进海里</button>
+            </div>
+        </form>
+
+        <div class="board-status" id="boardStatus" role="status"></div>
+        <div class="board-list" id="boardList"></div>
+
+        <div class="board-pager" id="boardPager">
+            <button class="board-page-btn" id="boardPrev" type="button">← 上一页</button>
+            <span class="board-page-info" id="boardPageInfo">1 / 1</span>
+            <button class="board-page-btn" id="boardNext" type="button">下一页 →</button>
+        </div>
+    </div>
+    </div>
+
+<script src="./app.js"></script>
+</body>
+</html>

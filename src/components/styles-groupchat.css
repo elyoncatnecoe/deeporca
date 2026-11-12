@@ -1,0 +1,89 @@
+/* 新建对话 / 群聊 面板。独立文件，避免和主 styles.css 互相踩。 */
+.newchat-mode {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.newchat-mode-btn {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--glass);
+  color: var(--dim);
+  font-size: 13px;
+  cursor: pointer;
+}
+.newchat-mode-btn.is-active {
+  border-color: var(--line-strong);
+  color: var(--text);
+  background: rgba(127, 227, 212, 0.12);
+}
+.newchat-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 320px;
+  overflow: auto;
+}
+.newchat-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: var(--glass);
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+.newchat-item.is-on {
+  border-color: var(--line-strong);
+  background: rgba(127, 227, 212, 0.14);
+}
+.newchat-item-name { flex: 1; font-size: 14px; }
+.newchat-item-tick { color: var(--aqua); font-weight: 700; }
+.newchat-warn {
+  margin: 14px 0 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(255, 155, 122, 0.12);
+  border: 1px solid rgba(255, 155, 122, 0.3);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.newchat-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--dim);
+}
+.newchat-field span { flex: 0 0 96px; }
+.newchat-field input[type='range'] { flex: 1; }
+.newchat-field input[type='number'] {
+  width: 72px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--glass);
+  color: var(--text);
+}
+.newchat-field em { flex: 0 0 44px; text-align: right; color: var(--text); }
+.newchat-switch {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+}
+.newchat-switch > div { flex: 1; }
+.newchat-switch strong { display: block; font-size: 13px; color: var(--text); }
+.newchat-switch small { display: block; font-size: 11px; color: var(--faint); margin-top: 2px; line-height: 1.5; }
+.newchat-foot { display: flex; gap: 10px; justify-content: flex-end; }

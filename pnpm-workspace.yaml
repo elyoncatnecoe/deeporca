@@ -1,0 +1,11 @@
+# The delivery folder may live on exFAT (no hardlinks/symlinks). Copy packages
+# and use a hoisted node_modules so `pnpm install` works there too.
+packageImportMethod: copy
+nodeLinker: hoisted
+
+allowBuilds:
+  electron: true
+  electron-winstaller: true
+  esbuild: true
+minimumReleaseAgeExclude:
+  - lucide-react@1.61.0

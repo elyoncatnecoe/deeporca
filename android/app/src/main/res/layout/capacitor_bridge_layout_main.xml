@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  覆盖 Capacitor 库的同名布局：唯一区别是把 com.getcapacitor.CapacitorWebView
+  换成我们自己的 DeepSeaWebView（压掉系统文本选择工具条，见该类注释）。
+  结构与 id 必须与库版本完全一致，否则 Bridge 里的 findViewById(R.id.webview) 会失败。
+-->
+<androidx.coordinatorlayout.widget.CoordinatorLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    tools:context="com.getcapacitor.BridgeActivity">
+
+    <com.elyoncat.deepsea.DeepSeaWebView
+        android:id="@+id/webview"
+        android:layout_width="fill_parent"
+        android:layout_height="fill_parent" />
+
+</androidx.coordinatorlayout.widget.CoordinatorLayout>

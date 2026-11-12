@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:usesCleartextTraffic="false"
+        android:theme="@style/AppTheme">
+
+        <activity
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|navigation"
+            android:name=".MainActivity"
+            android:label="@string/title_activity_main"
+            android:theme="@style/AppTheme.NoActionBarLaunch"
+            android:launchMode="singleTask"
+            android:windowSoftInputMode="adjustResize"
+            android:exported="true">
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+        </activity>
+
+        <activity
+            android:name=".WebChatActivity"
+            android:exported="false"
+            android:label="@string/title_activity_webchat"
+            android:theme="@style/AppTheme.NoActionBar"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|navigation" />
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths"></meta-data>
+        </provider>
+    </application>
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!--
+      日历便签到点提醒要发系统通知（@capacitor/local-notifications）。
+      Android 13（API 33）起通知属于运行时权限，光在这里声明还不够 ——
+      App 内第一次触发提醒时会通过 LocalNotifications.requestPermissions() 弹授权；
+      这一条是让系统知道「我们有这个能力」，否则 requestPermissions 在 13+ 直接返回拒绝。
+    -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!--
+      只写不读：存图到系统相册用（DeepSeaGalleryPlugin）。
+      maxSdkVersion=28 是刻意的 —— API 29+ 走 MediaStore 插入 Pictures/<相册名>，免权限；
+      这条权限在新系统上只会换来一次没有意义的授权弹窗。
+      也**不**声明 READ_MEDIA_IMAGES：我们从不读用户的相册，只往里写一张。
+    -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+</manifest>

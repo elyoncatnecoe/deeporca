@@ -1,0 +1,132 @@
+/*
+ * 记忆页「导入」相关样式。
+ * 单独一个文件而不是塞进 styles.css：styles.css 已经很大，导入是独立功能域，
+ * 拆开既好维护，也不会因为一个弹层样式去动全局样式表（降低回归风险）。
+ * 只复用全局的 CSS 变量（--accent / --danger / --dim / --line）与已有按钮类。
+ */
+
+/* 隐藏但可被脚本/无障碍访问的 file input：不能 display:none，否则部分环境里
+   程序化 click 与 e2e 的文件注入会失效；用 1px + 透明 + 裁剪代替。 */
+.import-file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+  opacity: 0;
+}
+
+.import-summary {
+  display: grid;
+  gap: 12px;
+}
+
+.import-kv {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+  color: var(--dim);
+}
+
+.import-kv strong {
+  color: var(--text, #e8f7f9);
+  font-weight: 600;
+}
+
+.import-hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--dim);
+}
+
+.import-mapping {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--dim);
+}
+
+.import-warnings {
+  display: grid;
+  gap: 4px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(255, 123, 123, 0.08);
+  border: 1px solid rgba(255, 123, 123, 0.25);
+}
+
+.import-warnings p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--danger);
+}
+
+.import-danger-note {
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(255, 123, 123, 0.1);
+  border: 1px solid rgba(255, 123, 123, 0.3);
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--danger);
+}
+
+.import-danger-note strong {
+  color: var(--danger);
+}
+
+.import-backup {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--dim);
+}
+
+.import-backup.is-done {
+  color: var(--aqua, #7fe3d4);
+}
+
+.import-backup.is-error {
+  color: var(--danger);
+}
+
+.import-progress {
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(127, 227, 212, 0.14);
+  overflow: hidden;
+}
+
+.import-progress > i {
+  display: block;
+  height: 100%;
+  min-width: 2px;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2, var(--accent)));
+  transition: width 0.2s ease;
+}
+
+.import-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.import-summary-ask {
+  display: grid;
+  gap: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line);
+}

@@ -1,0 +1,197 @@
+/*
+ * 助手面板专用样式。
+ *
+ * 单独成文件是为了不碰 styles.css —— 那份是多人共用的，改它容易和别人冲突。
+ * 这里只做「总开关 / 助手卡 / 三态头像」这三块新东西，其余沿用 settings-card、
+ * field、switch-row 这些已有类，保证和设置页视觉一致。
+ */
+
+/* 单列纵向排布：总开关在最上，助手卡与编辑面板依次往下。 */
+.assistants-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-content: start;
+}
+
+/* 总开关卡片贴顶，滚动编辑区时还能顺手关掉助手。 */
+.asst-switch-card {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: rgba(8, 31, 42, 0.92);
+  backdrop-filter: blur(6px);
+}
+
+/* 关掉总开关时整块灰掉、点不动，但配置原样保留。 */
+.assistant-panel[data-disabled='true'] {
+  opacity: 0.45;
+  filter: grayscale(0.5);
+  pointer-events: none;
+  user-select: none;
+}
+
+/* ------------------------------------------------------------ 助手卡片 */
+/* 240px 起的自适应网格：手机宽度下自然落成一列，避免卡片被挤得名字和按钮打架。 */
+.assistant-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.assistant-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.assistant-card[data-active='true'] {
+  border-color: var(--ds-brand, #6fd7f0);
+  background: rgba(111, 215, 240, 0.08);
+  box-shadow: inset 0 0 0 1px rgba(111, 215, 240, 0.25);
+}
+
+.assistant-card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.assistant-card .avatar {
+  border-radius: 12px;
+  flex: none;
+}
+
+.assistant-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.assistant-card-body strong {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* 名字过长时省略，别把「在用」徽标挤出去。 */
+.assistant-card-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.assistant-card-body small {
+  color: var(--faint);
+  font-size: 10.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 操作移到卡片底部单独一行，和名字/头像分开，窄屏也不会压字。 */
+.assistant-card-actions {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  padding-top: 7px;
+  border-top: 1px solid var(--line);
+  flex: none;
+}
+
+/* -------------------------------------------------------- 三态头像编辑 */
+.avatar-mode-tabs {
+  display: inline-flex;
+  gap: 2px;
+  width: fit-content;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.avatar-mode-tabs button {
+  border: none;
+  background: none;
+  color: var(--faint);
+  font-size: 11.5px;
+  padding: 5px 12px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.avatar-mode-tabs button[data-active='true'] {
+  background: rgba(111, 215, 240, 0.15);
+  color: var(--text);
+}
+
+.builtin-avatar-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.builtin-avatar-grid button {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: none;
+  color: var(--faint);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.builtin-avatar-grid button[data-active='true'] {
+  border-color: var(--ds-brand, #6fd7f0);
+  background: rgba(111, 215, 240, 0.1);
+  color: var(--text);
+}
+
+.builtin-avatar-grid img {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+}
+
+.emoji-avatar-row,
+.upload-avatar-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 2px;
+}
+
+/* .field input 是 100% 宽，这里只想要一个小输入框。 */
+.emoji-avatar-row input {
+  width: 84px;
+  flex: none;
+}
+
+.emoji-avatar-row small {
+  color: var(--faint);
+  font-size: 10px;
+}
+
+.upload-avatar-row .avatar,
+.emoji-avatar-row .avatar {
+  border-radius: 12px;
+  flex: none;
+}

@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="48 44 104 96" width="100%" height="100%">
+  <defs>
+    <!-- 水母身体渐变 -->
+    <linearGradient id="jellyGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF" />
+      <stop offset="100%" stop-color="#E0F7FA" />
+    </linearGradient>
+
+    <!-- 柔和发光滤镜 -->
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="4" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- 水母触手 -->
+  <g id="tentacles" fill="rgb(212, 232, 241)" opacity="0.9">
+    <!-- 左侧触手（镜像） -->
+    <g transform="translate(91, 112) scale(-0.04, 0.04)">
+      <path fill-rule="evenodd"
+            d="M317.1000,0.000 C317.1000,0.000 245.104,271.500 68.000,264.1000 C-2.516,262.412 -28.175,361.685 40.000,405.000 C143.048,470.473 385.836,444.355 419.1000,33.000 L317.1000,0.000 Z"/>
+    </g>
+    <!-- 右侧触手 -->
+    <g transform="translate(109, 112) scale(0.04)">
+      <path fill-rule="evenodd"
+            d="M317.1000,0.000 C317.1000,0.000 245.104,271.500 68.000,264.1000 C-2.516,262.412 -28.175,361.685 40.000,405.000 C143.048,470.473 385.836,444.355 419.1000,33.000 L317.1000,0.000 Z"/>
+    </g>
+  </g>
+
+  <!-- 水母头部 -->
+  <g id="head" filter="url(#glow)">
+    <!-- 头部轮廓 -->
+    <path d="M 60 110 
+             A 40 40 0 0 1 140 110 
+             Q 130 118, 120 110 
+             Q 110 118, 100 110 
+             Q 90 118, 80 110 
+             Q 70 118, 60 110 Z" 
+          fill="url(#jellyGrad)" />
+    
+    <!-- 头部高光 -->
+    <circle cx="80" cy="70" r="4" fill="#FFFFFF" opacity="0.5" />
+    <circle cx="120" cy="65" r="6" fill="#FFFFFF" opacity="0.3" />
+    <circle cx="100" cy="60" r="8" fill="#FFFFFF" opacity="0.2" />
+
+    <!-- 腮红 -->
+    <ellipse cx="70" cy="96" rx="7" ry="4" fill="#FFB6C1" opacity="0.6" />
+    <ellipse cx="130" cy="96" rx="7" ry="4" fill="#FFB6C1" opacity="0.6" />
+
+    <!-- 嘴巴 -->
+    <path d="M 94 93 C 94 98, 95 100, 100 100 C 105 100, 106 98, 106 93" 
+          fill="none" stroke="#8ECAE6" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
+  </g>
+</svg>

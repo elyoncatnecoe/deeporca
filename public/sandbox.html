@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      「运行代码 / 工坊预览」的沙箱页（BUG-REVIEW P0-4）。
+
+      为什么要有这么一个独立文件：
+      iframe 里用 srcDoc / blob: 加载的文档会**继承父页面的 CSP**，
+      父页面的 script-src 'self' 会连带把沙箱里的 inline 脚本一起拦掉（已实测）。
+      只有「真的从服务器取一份文档」才有自己的 CSP，不继承父页面。
+
+      这一页以 sandbox="allow-scripts"（**不给** allow-same-origin）挂进来，
+      所以它是不透明源：读不到 App 的 IndexedDB / localStorage / Cookie，
+      也摸不到父页面的 DOM。父页面把代码 postMessage 进来，这里跑完再把日志发回去。
+
+      关于 script-src 里的 https: / http: / blob:：
+      以前只允许 inline，导致 three.js 这类从 CDN 引的库一律被拦（工坊预览白屏）。
+      沙箱本身是不透明源，远程脚本在这里也只能在沙箱里跑，读不到 App 任何数据，
+      所以放开远程脚本是安全的；blob: 用于把用户的 ES module 代码包成模块加载。
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' https: http: blob:; style-src 'unsafe-inline' https: http:; img-src data: blob: https: http:; font-src data: https: http:; connect-src https: http:; media-src data: blob: https: http:; worker-src blob: https: http:"
+    />
+    <title>sandbox</title>
+  </head>
+  <body>
+    <script>
+      ;(function () {
+        var MAX_LOGS = 400
+
+        function format(value) {
+          if (typeof value === 'string') return value
+          try { return JSON.stringify(value) } catch (error) { return String(value) }
+        }
+
+        function makePush(logs) {
+          return function (prefix, args) {
+            if (logs.length >= MAX_LOGS) return
+            logs.push((prefix || '') + Array.prototype.map.call(args, format).join(' '))
+          }
+        }
+
+        function fakeConsoleFor(push) {
+          return {
+            log: function () { push('', arguments) },
+            info: function () { push('', arguments) },
+            warn: function () { push('⚠ ', arguments) },
+            error: function () { push('✖ ', arguments) },
+            debug: function () { push('', arguments) }
+          }
+        }
+
+        function post(logs) {
+          try { window.parent.postMessage({ deepseaRunLogs: logs }, '*') } catch (error) {}
+        }
+
+        /**
+         * 这段代码是不是 ES module。
+         *
+         * 为什么必须分开跑：`new Function` 的**函数体里出现 import/export 是语法错误**，
+         * 而 three.js 现在的推荐用法就是 `import * as THREE from 'https://…'`。
+         * 以前不管三七二十一全塞进 new Function，于是模块写法一律报
+         * 「Cannot use import statement outside a module」——用户看到的就是
+         * 「工坊对 three.js 支持有问题」。
+         */
+        function looksLikeModule(code) {
+          return /(^|\n)\s*(import\s|export\s)/.test(code)
+        }
+
+        function runClassic(code) {
+          var logs = []
+          var push = makePush(logs)
+          try {
+            var run = new Function('console', '"use strict";\n' + code)
+            var value = run(fakeConsoleFor(push))
+            if (value !== undefined) logs.push(format(value))
+          } catch (error) {
+            logs.push('✖ ' + (error && error.message ? error.message : String(error)))
+          }
+          return logs
+        }
+
+        /** 把代码包成 blob 模块加载：import/export 才有意义，日志边跑边收。 */
+        function runModule(code) {
+          var logs = []
+          var push = makePush(logs)
+          var finished = false
+          var originalConsole = window.console
+          var url = ''
+          window.console = fakeConsoleFor(push)
+
+          var finish = function (extra) {
+            if (finished) return
+            finished = true
+            if (extra) logs.push(extra)
+            window.console = originalConsole
+            window.removeEventListener('error', onError)
+            window.removeEventListener('unhandledrejection', onReject)
+            if (url !== '') { try { URL.revokeObjectURL(url) } catch (error) {} }
+            post(logs.length === 0 ? ['（没有输出）'] : logs)
+          }
+
+          var onError = function (event) {
+            var message = event && event.message ? event.message : '运行时出错'
+            finish('✖ ' + message)
+          }
+          var onReject = function (event) {
+            var reason = event && event.reason
+            finish('✖ ' + (reason && reason.message ? reason.message : String(reason)))
+          }
+          window.addEventListener('error', onError)
+          window.addEventListener('unhandledrejection', onReject)
+
+          try {
+            var blob = new Blob([code], { type: 'text/javascript' })
+            url = URL.createObjectURL(blob)
+            var script = document.createElement('script')
+            script.type = 'module'
+            script.src = url
+            // 模块的 load 在「下载 + 求值」都完成后才触发，正好当作收工信号。
+            script.onload = function () { finish(null) }
+            script.onerror = function () { finish('✖ 模块加载失败：检查 import 的地址是否可访问') }
+            document.head.appendChild(script)
+          } catch (error) {
+            finish('✖ ' + (error && error.message ? error.message : String(error)))
+          }
+        }
+
+        window.addEventListener('message', function (event) {
+          // 只认父窗口发来的指令。
+          if (event.source !== window.parent) return
+          var data = event.data
+          if (typeof data !== 'object' || data === null) return
+          if (typeof data.deepseaRunJs === 'string') {
+            if (looksLikeModule(data.deepseaRunJs)) {
+              // 异步：日志由 runModule 自己 post 回去，这里不能立刻回。
+              runModule(data.deepseaRunJs)
+              return
+            }
+            post(runClassic(data.deepseaRunJs))
+            return
+          }
+          if (typeof data.deepseaRunHtml === 'string') {
+            // HTML 预览：直接把整段写进这个沙箱文档。
+            document.open()
+            document.write(data.deepseaRunHtml)
+            document.close()
+          }
+        })
+
+        // 告诉父页面「我准备好了」（父页面也会用 onLoad 兜底）。
+        try { window.parent.postMessage({ deepseaSandboxReady: true }, '*') } catch (error) {}
+      })()
+    </script>
+  </body>
+</html>

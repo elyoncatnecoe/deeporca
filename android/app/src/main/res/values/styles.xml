@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!--
+      2026-10-29：父主题从 Theme.AppCompat.DayNight 改为固定的深色 Theme.AppCompat。
+
+      原因：Android WebView 的「系统 UI」——文本选择浮动工具条（复制/分享/全选/网页搜索/
+      翻译）、自动填充下拉、上下文菜单——都是**系统弹窗**，配色跟 Activity 主题走。
+      DayNight 在系统浅色模式下会解析成浅色主题，于是这些弹窗变成整块白底；用户长按
+      输入框/代码编辑器时看到的就是一大片白屏盖住界面。
+      我们 App 本身是固定的深海深色皮肤（color-scheme: dark），没有浅色版本，所以主题
+      也应当固定为深色，不再跟随系统。这样系统弹窗至少是深色，不再刺眼。
+    -->
+    <style name="AppTheme" parent="Theme.AppCompat.NoActionBar">
+        <item name="colorPrimary">@color/colorPrimary</item>
+        <item name="colorPrimaryDark">@color/colorPrimaryDark</item>
+        <item name="colorAccent">@color/colorAccent</item>
+        <item name="android:windowBackground">#04141d</item>
+        <item name="android:statusBarColor">#04141d</item>
+        <item name="android:navigationBarColor">#04141d</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <!--
+          系统弹层（文本选择工具条、上下文菜单、自动填充下拉）的底色与文字色。
+
+          这几项是「显式钉死」：父主题虽然是深色，但个别 OEM 会忽略默认值，一旦
+          解析成浅色，就是用户反馈过的「长按白屏」。把颜色写死在这里，比依赖
+          主题继承稳。
+        -->
+        <item name="colorBackgroundFloating">#0b1b24</item>
+        <item name="android:colorBackgroundFloating">#0b1b24</item>
+        <item name="android:textColorPrimary">#e6f2f6</item>
+        <item name="android:textColorSecondary">#9fc0cc</item>
+        <!--
+          文本编辑的「光标 / 选中高亮 / 选择手柄」重绘。
+
+          背景：这些是 WebView 交给系统画的原生资源，网页 CSS 只能控制
+          caret-color 与 ::selection，管不到手柄（那两个带白底的小水滴）。
+          这里把系统资源换成品牌色，并把手柄所在的 popup 窗口背景改成透明 ——
+          部分 ROM 上那个窗口会渲染成白色方块，就是「白底」的来源。
+
+          ⚠️ 是否生效取决于 WebView 是否读取这些框架属性，需要用真机确认；
+          不生效也不会有副作用（只是回到系统默认样式）。
+        -->
+        <item name="android:textColorHighlight">#447FE3D4</item>
+        <item name="android:textCursorDrawable">@drawable/ds_caret</item>
+        <item name="android:textSelectHandle">@drawable/ds_handle</item>
+        <item name="android:textSelectHandleLeft">@drawable/ds_handle</item>
+        <item name="android:textSelectHandleRight">@drawable/ds_handle</item>
+        <item name="android:textSelectHandleWindowStyle">@style/DsHandleWindow</item>
+    </style>
+
+    <style name="DsHandleWindow" parent="@android:style/Theme.Material.NoActionBar">
+        <!--
+          手柄所在的那个弹窗窗口。
+
+          现象：手柄周围有一块**白色方块**。手柄 drawable 已经换成我们自己的竖线
+          （说明主题属性确实生效），所以那块白底来自这个窗口的背景，不是手柄本身。
+          这里把窗口 / 内容 / 弹窗三层背景全部设成透明，并且不调暗背景，
+          试图把白底彻底去掉。
+        -->
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowIsFloating">true</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:colorBackground">@android:color/transparent</item>
+        <item name="android:popupBackground">@android:color/transparent</item>
+    </style>
+
+    <style name="AppTheme.NoActionBar" parent="Theme.AppCompat.NoActionBar">
+        <item name="windowActionBar">false</item>
+        <item name="windowNoTitle">true</item>
+        <item name="android:windowBackground">#04141d</item>
+        <item name="android:statusBarColor">#04141d</item>
+        <item name="android:navigationBarColor">#04141d</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <!-- 同 AppTheme：把系统弹层钉成深色，避免长按时出现白色面板。 -->
+        <item name="colorBackgroundFloating">#0b1b24</item>
+        <item name="android:colorBackgroundFloating">#0b1b24</item>
+        <item name="android:textColorPrimary">#e6f2f6</item>
+        <item name="android:textColorSecondary">#9fc0cc</item>
+        <!-- 同 AppTheme：光标 / 选中高亮 / 选择手柄的品牌色重绘（主界面用的是这个主题）。 -->
+        <item name="android:textColorHighlight">#447FE3D4</item>
+        <item name="android:textCursorDrawable">@drawable/ds_caret</item>
+        <item name="android:textSelectHandle">@drawable/ds_handle</item>
+        <item name="android:textSelectHandleLeft">@drawable/ds_handle</item>
+        <item name="android:textSelectHandleRight">@drawable/ds_handle</item>
+        <item name="android:textSelectHandleWindowStyle">@style/DsHandleWindow</item>
+        <!--
+          targetSdk 35（Android 15）起系统强制 edge-to-edge：内容必然画到状态栏
+          和导航栏底下。想不遮挡只能自己让出空间，见 MainActivity 里把真实
+          insets 写进 CSS 变量 safe-top / safe-bottom，以及 styles.css 的用法。
+          这两项是「显式声明」，让旧系统上的行为也一致。
+        -->
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+        <item name="android:enforceStatusBarContrast">false</item>
+        <item name="android:enforceNavigationBarContrast">false</item>
+    </style>
+
+    <style name="AppTheme.NoActionBarLaunch" parent="Theme.SplashScreen">
+        <item name="android:background">@drawable/splash</item>
+        <item name="windowSplashScreenBackground">#04141d</item>
+        <item name="postSplashScreenTheme">@style/AppTheme.NoActionBar</item>
+    </style>
+</resources>

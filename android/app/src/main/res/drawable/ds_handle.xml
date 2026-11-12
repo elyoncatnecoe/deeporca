@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  文本选择手柄：一根普通竖线。
+
+  之前做成水滴/气泡，在手机上白底一衬反而更抢眼。用户要的是「就是一根竖线」，
+  所以这里只画一条 2dp 宽、20dp 高的圆头竖条，颜色用品牌青。
+  左右两个手柄共用这一份（方向由系统自己翻）。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="6dp"
+    android:height="24dp"
+    android:viewportWidth="6"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#7FE3D4"
+        android:pathData="M2,1 L4,1 L4,23 L2,23 Z" />
+</vector>
