@@ -187,7 +187,6 @@ export function planUpsert(candidate: UpsertCandidate, existing: readonly Memory
   const text = normalizeText(candidate.text)
   const tokens = tokenize(text)
   let best: MemoryEntry | undefined
-  let bestScore = 0
   let bestCover = 0
   for (const memory of existing) {
     if (!sameBucket(memory, candidate)) continue
@@ -195,12 +194,20 @@ export function planUpsert(candidate: UpsertCandidate, existing: readonly Memory
     // 待确认的条目只是占位，不参与相似度竞争，避免反复堆积 pending。
     if (memory.pending === true) continue
     const other = tokenize(memory.text)
-    const score = jaccard(tokens, other)
     const cover = containment(tokens, other)
-    // 短句被长句包含时 Jaccard 会被长句稀释，所以用「谁更像」= 两者的较大值排序，
-    // 再分别用包含度认更新、用 Jaccard 认矛盾。
-    if (Math.max(score, cover) > bestScore) {
-      bestScore = Math.max(score, cover)
+    /*
+     * 只用包含度排序，不掺 Jaccard。
+     *
+     * 原来的写法是 `Math.max(score, cover) > bestScore`，注释说「用两者的较大值排序，
+     * 再分别用包含度认更新、用 Jaccard 认矛盾」。但这不可能发生：Jaccard 的分母是
+     * |A|+|B|-交集，包含度的分母是 min(|A|,|B|)，而 |A|+|B|-交集 ≥ min(|A|,|B|)，
+     * 所以 **Jaccard 恒 ≤ 包含度**，Math.max 永远取到包含度 —— 那个 score 从头到尾
+     * 没影响过任何判定（memory-core.test.ts 里有一条不变量用例守着）。
+     *
+     * 既然两条判定线其实是一条，就写清楚：包含度 ≥ 0.88 认「同一条的新版本」，
+     * ≥ 0.35 认「话题撞车、疑似矛盾」，其余新增。
+     */
+    if (cover > bestCover) {
       bestCover = cover
       best = memory
     }
@@ -208,7 +215,7 @@ export function planUpsert(candidate: UpsertCandidate, existing: readonly Memory
   if (best !== undefined && bestCover >= SIMILAR_THRESHOLD) {
     return { action: 'update', targetId: best.id, similarity: bestCover }
   }
-  if (best !== undefined && bestScore >= CONFLICT_THRESHOLD) return { action: 'pending' }
+  if (best !== undefined && bestCover >= CONFLICT_THRESHOLD) return { action: 'pending' }
   return { action: 'add' }
 }
 

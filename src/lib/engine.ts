@@ -1,5 +1,5 @@
 import { nanoid } from 'nanoid'
-import { addUsage, listMessageSiblings, putMedia, putMessage, rewriteMessageAndTruncate } from './db'
+import { addUsage, deleteMediaByMessage, listMessageSiblings, putMedia, putMessage, rewriteMessageAndTruncate } from './db'
 import { ApiError, streamChat, type StreamResult } from './deepseek'
 import { isTruncatedFinish, resolveOutputCap, retryCap } from './budget'
 import {
@@ -1334,6 +1334,16 @@ async function runTool(
         media.push(mediaRefOf(record))
       }
     } catch (error) {
+      /*
+       * 回滚（T-14）：媒体先写库、消息后写库，中间任何一步抛错都会留下
+       * messageId 指向「不存在的消息」的孤儿媒体 —— 界面上永远看不见，
+       * 字节却永久占着配额。db.ts 已有 deleteMediaByMessage，把这一批删干净。
+       *
+       * 注意这里是**回滚**，不是「先 append 占位消息再写媒体」：后者与上面
+       * 「引用必须先能查到」的渲染顺序冲突，也会破坏 T-05 的停止语义。
+       */
+      await deleteMediaByMessage(messageId).catch(() => undefined)
+      media.length = 0
       resultText = `${resultText}（媒体保存失败：${errorText(error)}）`
     }
   }
@@ -1349,7 +1359,13 @@ async function runTool(
     createdAt: Date.now(),
     status: 'done',
   }
-  await useAppStore.getState().actions.appendMessage(message)
+  try {
+    await useAppStore.getState().actions.appendMessage(message)
+  } catch (error) {
+    // 消息最终没落库：上面写进去的媒体同样成了孤儿，一起收掉再抛（T-14）。
+    if (media.length > 0) await deleteMediaByMessage(messageId).catch(() => undefined)
+    throw error
+  }
   return { message, changed, targetWorkspaceId, workspaceName }
 }
 

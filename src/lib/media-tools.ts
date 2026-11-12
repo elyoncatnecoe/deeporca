@@ -1,5 +1,5 @@
 import { generateImages, isImageConfigured, isMediaAbort, isSpeechConfigured, MediaApiError, synthesizeSpeech } from './media-api.ts'
-import { mediaAltFromPrompt } from './media-store.ts'
+import { MAX_AUDIO_BYTES, MAX_IMAGE_BYTES, mediaAltFromPrompt, mediaWithinLimit } from './media-store.ts'
 import type { ImageApiConfig, Settings, SpeechApiConfig } from './types'
 
 /**
@@ -197,9 +197,24 @@ async function runGenerateImage(args: Record<string, unknown>, context: MediaToo
       alt: mediaAltFromPrompt(prompt),
     }))
     const mode = referenceImages.length > 0 ? '参考图' : '文生图'
+    /*
+     * 落库前先卡体积（T-19）。
+     *
+     * mediaWithinLimit 一直只有定义、零调用：超过 16MB 的图照样被转成 data URL 写进
+     * IndexedDB（还会经 IPC 再复制一份），一次生图就能把配额吃光。这里在**写库之前**
+     * 剔掉超限的，而不是等写完了再想办法删。
+     */
+    const kept = media.filter((draft) => mediaWithinLimit('image', draft.dataUrl))
+    const dropped = media.length - kept.length
+    const limitMb = Math.round(MAX_IMAGE_BYTES / (1024 * 1024))
+    if (kept.length === 0) {
+      return { resultText: `生图返回的图片太大（单张上限 ${limitMb}MB），没有保存。请降低尺寸或质量后重试。`, media: [] }
+    }
     return {
-      resultText: `已生成 ${media.length} 张图片（${mode}，${size || '默认尺寸'}）。客户端已经显示在对话里，不要输出假图片链接。`,
-      media,
+      resultText: `已生成 ${kept.length} 张图片（${mode}，${size || '默认尺寸'}）。`
+        + `${dropped > 0 ? `另有 ${dropped} 张超过 ${limitMb}MB，已丢弃。` : ''}`
+        + '客户端已经显示在对话里，不要输出假图片链接。',
+      media: kept,
     }
   } catch (error) {
     // 取消不是「失败」：说清楚是用户停的，别让模型去重试一次已经取消的生图。
@@ -222,6 +237,11 @@ async function runSpeak(args: Record<string, unknown>, context: MediaToolContext
     // 同上：被停止的语音不要再落库（T-07）。
     if (context.signal?.aborted === true) {
       return { resultText: '已停止：这次语音生成被取消，没有保存音频。', media: [] }
+    }
+    // 体积闸门（T-19）：一段语音超过 12MB 就不该进 IndexedDB。
+    if (!mediaWithinLimit('audio', audio.dataUrl)) {
+      const limitMb = Math.round(MAX_AUDIO_BYTES / (1024 * 1024))
+      return { resultText: `语音太长（单段上限 ${limitMb}MB），没有保存。请把内容拆成几段再试。`, media: [] }
     }
     return {
       resultText: `已生成语音（${text.length} 字，${config.voice || '默认音色'}）。客户端已显示播放器，需要用户自己点播放。`,
