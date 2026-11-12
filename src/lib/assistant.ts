@@ -1,5 +1,6 @@
 import type { Assistant, AssistantRegex, Conversation, ConversationConfig, Settings, ThinkingEffort } from './types.ts'
 import { DEFAULT_ASSISTANT_ID } from './types.ts'
+import { isWebChatModel } from './models.ts'
 
 /**
  * 取一个助手；找不到就退回第一个（永远存在，sanitize 保证）。
@@ -68,6 +69,38 @@ export function normalizeConfig(config: ConversationConfig): ConversationConfig 
 export function conversationConfig(settings: Settings, conversation: Conversation | undefined): ConversationConfig {
   if (conversation?.config !== undefined) return normalizeConfig(conversation.config)
   return resolveAssistantConfig(settings, findAssistant(settings, conversation?.assistantId))
+}
+
+/**
+ * 一段对话**实际生效**的设置：模型 / 温度 / 思考强度等按「对话快照 → 助手覆盖 → 全局」取值。
+ *
+ * 为什么需要它：发送链路里原来有两套判断 —— `sendMessage()` 拿**全局** settings 决定
+ * 「要不要走网页账号 / 有没有 Key」，而 `runAssistantTurn()` 用 cfg.model 发请求。
+ * 一旦助手或对话快照覆盖了模型，两边就会打架，真机上的表现是：
+ *   · 全局是网页账号、快照是 API 模型 → 进了网页登录流程，请求却按 API 发 → 「还没有填 API Key」/401；
+ *   · 全局是 API、快照是网页模型 → 直接走离线回复 → 「还没接上模型，点这里填 API Key」。
+ * 现在两处都用这一个函数算出来的设置，判断和请求永远同源。
+ */
+export function effectiveSettings(settings: Settings, conversation: Conversation | undefined): Settings {
+  const cfg = conversationConfig(settings, conversation)
+  /*
+   * 网页账号是「账号模式」，不是模型偏好。
+   *
+   * 全局选了网页账号，就不许助手覆盖 / 对话快照把这一轮拽回某个 API 模型 —— 否则
+   * 真机上会出现「设置里明明是网页账号，发出去却按助手的旧 API 模型走」，然后报
+   * 「API Key 无效或已过期」（那个 Key 早就过期了）。
+   *
+   * 反过来仍然成立：全局是 API 模型时，对话快照 / 助手可以单独指定网页模型。
+   */
+  const model = isWebChatModel(settings.model) ? settings.model : cfg.model
+  return {
+    ...settings,
+    model,
+    temperature: cfg.temperature,
+    thinkingEffort: cfg.thinkingEffort,
+    recentChats: cfg.recentChats,
+    timeReminder: cfg.timeReminder,
+  }
 }
 
 /** 把 `{{ message }}` 套进助手的消息模板；没配模板就原样返回。 */

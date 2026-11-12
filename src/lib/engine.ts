@@ -12,7 +12,8 @@ import {
   remember,
 } from './memory'
 import { conversationDigest, maybeCompress } from './compress'
-import { applyMessageTemplate, conversationConfig, findAssistant, resolveAssistantConfig } from './assistant'
+import { applyMessageTemplate, conversationConfig, effectiveSettings, findAssistant, resolveAssistantConfig } from './assistant'
+import { isWebChatModel } from './models'
 import { buildRequestMessages, buildRequestMessagesDetailed, buildSystemPrompt, estimateTokens } from './prompt'
 import { bodyMind, extractBodyDirectives, type BodyDirective } from './body'
 import { parseCommand } from './commands'
@@ -267,7 +268,18 @@ export async function sendMessage(
     return false
   }
   const store = useAppStore.getState()
-  const settings = store.settings
+  /*
+   * 路由判断用「这段对话实际生效的设置」，不是全局 settings。
+   *
+   * 助手可以覆盖模型、对话也有快照。全局与生效值不一致时，以前两套判断会打架：
+   * 全局是网页账号、快照是 API 模型 → 进了登录流程但请求按 API 发 → 「还没有填 API Key」/401；
+   * 全局是 API、快照是网页模型 → 直接走离线回复 → 「还没接上模型，点这里填 API Key」。
+   * runAssistantTurn 用的是 cfg.model，这里也用同一份。
+   */
+  const effective = effectiveSettings(
+    store.settings,
+    store.conversations.find((item) => item.id === store.activeId),
+  )
 
   /*
    * 整条链路（占位 → 准备 → 取消闸门 → 提交 → 统一释放）都在 runSend 里。
@@ -287,13 +299,13 @@ export async function sendMessage(
     notify: (message) => useAppStore.getState().actions.showToast(message),
     runLocalCommand: (signal) => runLocalCommand(trimmed, attachments, signal),
     runOfflineReply: (signal) => runOfflineReply(trimmed, attachments, signal),
-    hasApiKey: hasApiKey(settings),
-    isWebChatProvider: isWebChatProvider(settings),
+    hasApiKey: hasApiKey(effective),
+    isWebChatProvider: isWebChatProvider(effective),
     webChatReady,
     loginWebChat,
     commit: (turn) => runSendCommit({
       store,
-      settings,
+      settings: effective,
       trimmed,
       attachments,
       options,
@@ -589,9 +601,10 @@ async function runAssistantTurn(options: {
       ? resolveAssistantConfig(options.settings, options.respondAs)
       : conversationConfig(options.settings, conversation)
     // 助手可以覆盖模型 / 温度 / 思考强度 / 回顾 / 时间提醒；没覆盖的跟随全局。
+    // 但「全局选了网页账号」是账号模式，不许被助手/快照拽回 API 模型（真机 401 的根因）。
     const settings: Settings = {
       ...options.settings,
-      model: cfg.model,
+      model: isWebChatModel(options.settings.model) ? options.settings.model : cfg.model,
       temperature: cfg.temperature,
       thinkingEffort: cfg.thinkingEffort,
       recentChats: cfg.recentChats,
