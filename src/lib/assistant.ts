@@ -1,5 +1,6 @@
 import type { Assistant, AssistantRegex, Conversation, ConversationConfig, Settings, ThinkingEffort } from './types.ts'
 import { DEFAULT_ASSISTANT_ID } from './types.ts'
+import { isWebChatModel } from './models.ts'
 
 /**
  * 取一个助手；找不到就退回第一个（永远存在，sanitize 保证）。
@@ -82,9 +83,19 @@ export function conversationConfig(settings: Settings, conversation: Conversatio
  */
 export function effectiveSettings(settings: Settings, conversation: Conversation | undefined): Settings {
   const cfg = conversationConfig(settings, conversation)
+  /*
+   * 网页账号是「账号模式」，不是模型偏好。
+   *
+   * 全局选了网页账号，就不许助手覆盖 / 对话快照把这一轮拽回某个 API 模型 —— 否则
+   * 真机上会出现「设置里明明是网页账号，发出去却按助手的旧 API 模型走」，然后报
+   * 「API Key 无效或已过期」（那个 Key 早就过期了）。
+   *
+   * 反过来仍然成立：全局是 API 模型时，对话快照 / 助手可以单独指定网页模型。
+   */
+  const model = isWebChatModel(settings.model) ? settings.model : cfg.model
   return {
     ...settings,
-    model: cfg.model,
+    model,
     temperature: cfg.temperature,
     thinkingEffort: cfg.thinkingEffort,
     recentChats: cfg.recentChats,

@@ -68,16 +68,42 @@ test('没有助手覆盖、没有快照时，跟随全局模型', () => {
   assert.equal(effectiveSettings(settings, undefined).model, 'deepseek-chat-web')
 })
 
-test('助手覆盖了模型时，以助手为准（这是「跳回助手模型」的直接原因）', () => {
+test('助手覆盖了模型时，以助手为准（全局是 API 模型的前提下）', () => {
+  const settings = settingsWith({
+    model: 'deepseek-chat',
+    assistants: [{ ...baseAssistant, model: 'deepseek-reasoner' }],
+  })
+  assert.equal(effectiveSettings(settings, undefined).model, 'deepseek-reasoner')
+})
+
+test('全局选了网页账号时，助手覆盖不能把它拽回 API 模型（真机 401 的根因）', () => {
   const settings = settingsWith({
     model: 'deepseek-chat-web',
     assistants: [{ ...baseAssistant, model: 'deepseek-chat' }],
   })
   assert.equal(
     effectiveSettings(settings, undefined).model,
-    'deepseek-chat',
-    '助手级覆盖会盖住全局选择 —— 所以聊天页切模型时必须把它清掉',
+    'deepseek-chat-web',
+    '网页账号是账号模式，不是模型偏好 —— 全局选了它就必须真的走它',
   )
+})
+
+test('全局选了网页账号时，对话快照也不能把它拽回 API 模型', () => {
+  const settings = settingsWith({ model: 'deepseek-chat-web' })
+  const conversation = conversationWith({
+    name: baseAssistant.name,
+    avatar: baseAssistant.avatar,
+    systemPrompt: baseAssistant.systemPrompt,
+    model: 'deepseek-chat',
+    temperature: 1,
+    thinkingEffort: 'off',
+    presetMessages: [],
+    messageTemplate: '',
+    regexes: [],
+    recentChats: true,
+    timeReminder: true,
+  } as Conversation['config'])
+  assert.equal(effectiveSettings(settings, conversation).model, 'deepseek-chat-web')
 })
 
 test('对话快照优先于助手覆盖', () => {
@@ -130,12 +156,16 @@ test('sendMessage 用 effectiveSettings 判断路由，而不是全局 settings'
   assert.match(body, /settings: effective,/, '提交阶段也传同一份，请求与判断同源')
 })
 
-test('runAssistantTurn 也是用 cfg.model 构建设置（和上面同源）', () => {
+test('runAssistantTurn 用的是同一套「网页账号优先」规则', () => {
   const engine = stripComments(read('src/lib/engine.ts'))
   const start = engine.indexOf('async function runAssistantTurn')
   const body = engine.slice(start, start + 3000)
   assert.match(body, /const cfg = /, '要先算出这段对话的配置')
-  assert.match(body, /model: cfg\.model,/, '请求用的模型来自 cfg')
+  assert.match(
+    body,
+    /model: isWebChatModel\(options\.settings\.model\) \? options\.settings\.model : cfg\.model/,
+    '实际发请求那一层也必须让网页账号压过助手/快照的模型覆盖',
+  )
   assert.match(body, /const webMode = isWebChatProvider\(settings\)/, '路由判断用同一份 settings')
 })
 

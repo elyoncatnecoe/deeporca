@@ -13,6 +13,7 @@ import {
 } from './memory'
 import { conversationDigest, maybeCompress } from './compress'
 import { applyMessageTemplate, conversationConfig, effectiveSettings, findAssistant, resolveAssistantConfig } from './assistant'
+import { isWebChatModel } from './models'
 import { buildRequestMessages, buildRequestMessagesDetailed, buildSystemPrompt, estimateTokens } from './prompt'
 import { bodyMind, extractBodyDirectives, type BodyDirective } from './body'
 import { parseCommand } from './commands'
@@ -600,9 +601,10 @@ async function runAssistantTurn(options: {
       ? resolveAssistantConfig(options.settings, options.respondAs)
       : conversationConfig(options.settings, conversation)
     // 助手可以覆盖模型 / 温度 / 思考强度 / 回顾 / 时间提醒；没覆盖的跟随全局。
+    // 但「全局选了网页账号」是账号模式，不许被助手/快照拽回 API 模型（真机 401 的根因）。
     const settings: Settings = {
       ...options.settings,
-      model: cfg.model,
+      model: isWebChatModel(options.settings.model) ? options.settings.model : cfg.model,
       temperature: cfg.temperature,
       thinkingEffort: cfg.thinkingEffort,
       recentChats: cfg.recentChats,
