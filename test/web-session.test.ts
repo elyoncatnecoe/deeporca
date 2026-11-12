@@ -306,9 +306,12 @@ test('S13 unlink 失败但截断成功：视为旧会话已失效，forget 成�
   }
 })
 
-test('S14 结构断言：main.ts 把双重失败交给 toLoginFailure，不自行吞掉', () => {
+test('S14 结构断言：webapi:forget 不吞删除失败（走 IPC rejection）', () => {
   const main = readFileSync(join(root, 'electron/main.ts'), 'utf8')
-  const calls = main.match(/toLoginFailure\(error\)/g) ?? []
-  assert.ok(calls.length >= 2, '登录与采集两个入口都必须把异常转成明确失败响应')
-  assert.doesNotMatch(main, /stale-not-removed/, '旧的「返回失败对象」分支应已移除')
+  const start = main.indexOf("trustedHandle('webapi:forget'")
+  assert.ok(start >= 0, '找不到 webapi:forget handler')
+  const nextHandler = main.indexOf("trustedHandle('webapi:send'", start)
+  const handler = main.slice(start, nextHandler > start ? nextHandler : start + 400)
+  assert.match(handler, /forgetWebSession\(\)/, 'handler 应直接调用 forgetWebSession')
+  assert.doesNotMatch(handler, /catch/, '不得 catch 后把删除失败吞掉')
 })

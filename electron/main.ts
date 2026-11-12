@@ -25,10 +25,8 @@ import {
   verifySession,
   uploadWebFile,
   webSend,
-  type CapturedSession,
   type SessionPersistResult,
 } from './deepseek-api'
-import { toLoginFailure } from './web-login'
 
 /** 等用户登录最多等这么久（扫码/人机校验都需要时间）。 */
 const LOGIN_TIMEOUT_MS = 300_000
@@ -37,7 +35,7 @@ const LOGIN_TIMEOUT_MS = 300_000
  * 把「登录态没存下来」翻译成给用户看的一句话。
  *
  * 注意：双重失败（新会话写不进 + 旧会话清不掉）不会走到这里 —— 那条路径由
- * `save()` 直接抛 `SessionRemoveError`，由 `toLoginFailure` 处理。
+ * `save()` 直接抛 `SessionRemoveError`，经 IPC rejection 传到前端 `.catch()`。
  */
 function persistFailureText(result: Extract<SessionPersistResult, { ok: false }>): string {
   try {
@@ -836,14 +834,11 @@ if (!singleInstance) {
 
       const deadline = Date.now() + LOGIN_TIMEOUT_MS
       while (Date.now() < deadline) {
-        let captured: CapturedSession | null = null
-        try {
-          captured = await captureSessionFromWindow(win)
-        } catch (error) {
-          // 双重失败（新会话没写进去、旧会话也清不掉）必须变成明确的失败响应，
-          // 不能吞、也不能报成功 —— 否则重启后会回到旧账号。
-          return toLoginFailure(error)
-        }
+        // 注意：这里**不 catch**。`save()` 的「双重清理失败」是
+        // SessionRemoveError，必须原样抛出去变成 IPC rejection ——
+        // 一旦在这里转成 `{ ok: false }` 的正常返回，调用方很容易只判 ok 后
+        // 当成普通失败处理，界面就会误报「已清除」。
+        const captured = await captureSessionFromWindow(win)
         if (captured !== null) {
           // 存不下来就别假装登录成功：内存已经回滚，这里如实告诉用户原因，
           // 否则重启后会莫名其妙回到旧账号。
@@ -894,12 +889,8 @@ if (!singleInstance) {
     trustedHandle('webapi:capture', async () => {
       const win = liveWebChatWindow()
       if (win === null) return { ok: false, error: 'no-window' }
-      let captured: CapturedSession | null = null
-      try {
-        captured = await captureSessionFromWindow(win)
-      } catch (error) {
-        return toLoginFailure(error)
-      }
+      // 同样不 catch：失败以 IPC rejection 传出去，由前端 .catch() 显示。
+      const captured = await captureSessionFromWindow(win)
       if (captured === null) return { ok: false, error: '还没登录：窗口里没有 userToken' }
       if (!captured.persist.ok) {
         return { ok: false, error: persistFailureText(captured.persist) }

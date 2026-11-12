@@ -220,7 +220,10 @@ export function createSessionStore(options: SessionStoreOptions): SessionStore {
        */
       cached = previous
       throw new SessionRemoveError(
-        `${message}；且本地旧登录态文件未能清除（${removed.message}），重启后可能恢复旧账号`,
+        // 这句前缀是**用户可见文案**，也是渲染层识别这类失败的锚点：
+        // 异常会以 IPC rejection 传到前端，Electron 会在消息前面加一截包装，
+        // 前端按这个短语截取，才能显示成一句干净的话。
+        `旧登录态清理失败：${message}；且本地旧登录态文件未能清除（${removed.message}），重启后可能恢复旧账号`,
       )
     }
 

@@ -191,6 +191,22 @@ export function loginResultToast(result: { ok: boolean; message?: string }): str
   return result.message ?? '登录没有完成'
 }
 
+/**
+ * IPC **rejection** → 用户看到的提示。
+ *
+ * 主进程的「旧登录态清理失败」是抛异常走的 IPC rejection（不是结构化返回），
+ * 而 Electron 会在消息前面包一层 `Error invoking remote method 'webapi:login': ...`。
+ * 这里按锚点短语把它截出来，让用户看到干净的一句；认不出就原样给，至少不静默。
+ */
+export function loginFailureToast(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error)
+  const marker = '旧登录态清理失败'
+  const index = raw.indexOf(marker)
+  if (index >= 0) return raw.slice(index).trim()
+  const trimmed = raw.trim()
+  return trimmed === '' ? '登录流程出错' : trimmed
+}
+
 /** 等用户登录的上限（扫码、人机校验都需要时间）。 */
 const LOGIN_TIMEOUT_MS = 300_000
 

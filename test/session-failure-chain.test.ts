@@ -6,20 +6,18 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const root = join(dirname(fileURLToPath(import.meta.url)), '..')
-
 /**
- * P1-2 的**调用链**测试：save() 双重失败 → 抛 SessionRemoveError → IPC 层转成
- * 明确失败响应 → 渲染层映射 → UI 文案。
+ * P1-2 的**调用链**测试（IPC rejection 语义）。
  *
- * 这里刻意不用「孤立 mock + 字符串断言」：
- *   - `createSessionStore` 是生产实现，只替换了文件层（造 EPERM/EACCES）；
- *   - `captureSessionWith` 是生产实现（`webapi:login` 真正调用的那个）；
- *   - `toLoginFailure` 是 `main.ts` 真正调用的转换函数；
- *   - `mapLoginResponse` / `loginResultToast` 是渲染层真正调用的映射函数。
- * 即：除了「React 组件没渲染」这一跳，其余每一跳都是真实代码在跑。
+ * 约定：`save()` 的「双重清理失败」抛 `SessionRemoveError`；主进程**不 catch**，
+ * 让异常经 IPC rejection 传回渲染层，由前端 `.catch()` 显示「旧登录态清理失败」。
  *
- * **这不是端到端测试**：没有启动 Electron、没有真实 IPC、没有渲染 DOM。
+ * 这里除了「React 渲染」这一跳，其余都是生产实现在跑：
+ *   - `createSessionStore` / `captureSessionWith`（web-session.ts）
+ *   - `loginFailureToast`（web-chat.ts，Settings 页与 engine 都调它）
+ *
+ * **这不是端到端测试**：没有启动 Electron、没有真实 IPC 通道、没有渲染 DOM。
+ * Electron 的 rejection 包装（`Error invoking remote method ...`）在这里是**手工模拟**的。
  */
 
 registerHooks({
@@ -35,13 +33,14 @@ registerHooks({
   },
 })
 
+const root = join(dirname(fileURLToPath(import.meta.url)), '..')
+
 const {
   SessionRemoveError,
   captureSessionWith,
   createSessionStore,
 } = await import('../electron/web-session.ts')
-const { STALE_SESSION_CLEANUP_FAILED, toLoginFailure } = await import('../electron/web-login.ts')
-const { loginResultToast, mapLoginResponse } = await import('../src/lib/web-chat.ts')
+const { loginFailureToast, loginResultToast, mapLoginResponse } = await import('../src/lib/web-chat.ts')
 
 const SAFE = {
   isEncryptionAvailable: () => true,
@@ -85,10 +84,14 @@ function failingFs(state: { fail: boolean }) {
   }
 }
 
-/** 模拟网页窗里执行脚本：返回新账号的 token。 */
 const executeNewToken = async (script: string): Promise<unknown> => {
   if (script.includes('userToken')) return NEW_TOKEN
   return 'UA/new'
+}
+
+/** 模拟 Electron 把主进程异常包成 rejection 消息后的样子。 */
+function asIpcRejection(error: Error): Error {
+  return new Error(`Error invoking remote method 'webapi:login': ${error.name}: ${error.message}`)
 }
 
 test('C1 双重失败时 save() 抛 SessionRemoveError（不是返回 ok:false 对象）', () => {
@@ -101,14 +104,19 @@ test('C1 双重失败时 save() 抛 SessionRemoveError（不是返回 ok:false �
     state.fail = true
     assert.throws(
       () => store.save({ token: NEW_TOKEN, userAgent: 'UA/new', savedAt: 2000 }, { invalidateStale: true }),
-      SessionRemoveError,
+      (error: unknown) => {
+        assert.ok(error instanceof SessionRemoveError)
+        assert.match((error as Error).message, /^旧登录态清理失败：/, '消息必须以用户可见短语开头')
+        assert.match((error as Error).message, /未能清除/)
+        return true
+      },
     )
   } finally {
     cleanup()
   }
 })
 
-test('C2 采集链路把异常原样传上来（captureSessionWith 不吞）', async () => {
+test('C2 采集链路把异常原样传上来（captureSessionWith 不吞），旧缓存不清空', async () => {
   const { file, cleanup } = tempFile()
   try {
     const state = { fail: false }
@@ -123,44 +131,37 @@ test('C2 采集链路把异常原样传上来（captureSessionWith 不吞）', a
   }
 })
 
-test('C3 IPC 层：异常被转成明确失败响应，绝不会是成功', () => {
-  const error = new SessionRemoveError('网页登录态写入失败（EACCES: simulated）；且本地旧登录态文件未能清除')
-  const response = toLoginFailure(error)
-
-  assert.equal(response.ok, false, 'IPC 响应必须是失败')
-  assert.match(response.error, new RegExp(STALE_SESSION_CLEANUP_FAILED), '必须点明「旧登录态清理失败」')
-  assert.doesNotMatch(response.error, /已清除|已连接|成功/, '不得出现误导性成功措辞')
+test('C3 主进程不 catch：main.ts 里没有把异常转成正常返回对象', () => {
+  const main = readFileSync(join(root, 'electron/main.ts'), 'utf8')
+  assert.doesNotMatch(main, /toLoginFailure/, '不得再引入「异常转返回对象」的转换函数')
+  // capture 调用点不能包在 try/catch 里转成 { ok:false }。
+  const wrapped = /try\s*\{[^}]*captureSessionFromWindow/s.test(main)
+  assert.equal(wrapped, false, 'captureSessionFromWindow 不能被 try/catch 包住吞掉')
+  assert.match(main, /await captureSessionFromWindow\(win\)/, '仍应直接 await，让异常冒成 rejection')
 })
 
-test('C4 非 SessionRemoveError 不被这里吞掉（保持原有语义，不扩大范围）', () => {
-  const other = new Error('some other failure')
-  assert.throws(() => toLoginFailure(other), /some other failure/)
+test('C4 前端能处理 Electron 包装后的 rejection，并显示指定提示', () => {
+  const original = new SessionRemoveError(
+    '旧登录态清理失败：网页登录态写入失败（EACCES: simulated）；且本地旧登录态文件未能清除（EPERM: simulated），重启后可能恢复旧账号',
+  )
+  const toast = loginFailureToast(asIpcRejection(original))
+
+  assert.match(toast, /^旧登录态清理失败/, '必须以指定提示开头')
+  assert.doesNotMatch(toast, /Error invoking remote method/, '必须去掉 IPC 包装噪声')
+  assert.doesNotMatch(toast, /已连接|已退出|已清除/, '不得出现误导性成功措辞')
 })
 
-test('C5 前端映射：失败原因一路变成 UI 文案', () => {
-  const response = toLoginFailure(new SessionRemoveError('网页登录态写入失败；且本地旧登录态文件未能清除'))
-  const login = mapLoginResponse(response)
-  const toast = loginResultToast(login)
-
-  assert.equal(login.ok, false)
-  assert.match(login.message ?? '', new RegExp(STALE_SESSION_CLEANUP_FAILED))
-  assert.match(toast, new RegExp(STALE_SESSION_CLEANUP_FAILED), 'UI 文案必须包含指定提示')
-  assert.doesNotMatch(toast, /已连接|已清除/, '不能显示成功提示')
+test('C5 其它异常不被吞：原样交给用户', () => {
+  assert.equal(loginFailureToast(new Error('窗口打不开了')), '窗口打不开了')
+  assert.equal(loginFailureToast(''), '登录流程出错')
 })
 
-test('C7 UI 接线：Settings 页确实把结果交给 loginResultToast，并捕获 rejection', () => {
-  /*
-   * 这是整条链上**唯一无法在 node 里执行**的一跳（React 组件渲染）。
-   * 所以这里只做结构断言，并在报告里如实标注为「未执行渲染」，
-   * 不把它算作端到端验证。
-   */
-  const settings = readFileSync(join(root, 'src/components/Settings.tsx'), 'utf8')
-  assert.match(settings, /showToast\(loginResultToast\(result\)\)/, 'UI 必须用统一文案函数显示结果')
-  assert.match(settings, /\.catch\(/, 'UI 必须捕获 IPC rejection，不能静默丢弃')
-  assert.doesNotMatch(settings, /result\.ok \? '网页账号已连接/, '不能残留旧的「成功就报已连接」内联文案')
+test('C6 成功路径不回归：结构化结果仍走 loginResultToast', () => {
+  assert.equal(loginResultToast({ ok: true }), '网页账号已连接，以后不用再登录')
+  assert.equal(loginResultToast(mapLoginResponse({ ok: false, error: '超时了' })), '超时了')
 })
 
-test('C6 完整链路：save → capture → IPC 响应 → UI 文案（一次跑通）', async () => {
+test('C7 完整链路：save 抛错 → 采集传播 → IPC rejection → 前端提示（一次跑通）', async () => {
   const { file, cleanup } = tempFile()
   try {
     const state = { fail: false }
@@ -169,7 +170,7 @@ test('C6 完整链路：save → capture → IPC 响应 → UI 文案（一次�
 
     state.fail = true
 
-    // ① 采集（生产实现）→ ② save 抛异常
+    // ① 采集（生产实现）→ ② save 抛 SessionRemoveError
     let thrown: unknown = null
     try {
       await captureSessionWith(executeNewToken, store)
@@ -178,18 +179,30 @@ test('C6 完整链路：save → capture → IPC 响应 → UI 文案（一次�
     }
     assert.ok(thrown instanceof SessionRemoveError, '采集链路必须抛出 SessionRemoveError')
 
-    // ③ IPC handler（生产实现）把它变成失败响应
-    const response = toLoginFailure(thrown)
-    assert.equal(response.ok, false)
+    // ③ 主进程不 catch → Electron 包成 rejection（此处模拟包装）
+    const rejection = asIpcRejection(thrown as Error)
 
-    // ④ 渲染层（生产实现）映射成 UI 文案
-    const toast = loginResultToast(mapLoginResponse(response))
+    // ④ 前端 .catch() 用生产函数生成提示
+    const toast = loginFailureToast(rejection)
     assert.match(toast, /旧登录态清理失败/, 'UI 必须显示「旧登录态清理失败」')
-
-    // ⑤ 失败后的状态：旧会话缓存没被清空，也没有任何「成功」痕迹
-    assert.equal(store.peek()?.token, OLD_SESSION.token, '旧会话缓存必须保留')
     assert.doesNotMatch(toast, /已连接|已退出|已清除/, '不得误报成功')
+
+    // ⑤ 失败后旧会话缓存仍在
+    assert.equal(store.peek()?.token, OLD_SESSION.token, '旧会话缓存必须保留')
   } finally {
     cleanup()
   }
+})
+
+test('C8 UI 接线：Settings 与 engine 都接住 rejection', () => {
+  /*
+   * 这是整条链上**唯一无法在 node 里执行**的一跳（React 渲染）。
+   * 只做结构断言，报告里标注为「未执行渲染」，不算端到端验证。
+   */
+  const settings = readFileSync(join(root, 'src/components/Settings.tsx'), 'utf8')
+  assert.match(settings, /\.catch\(/, 'Settings 必须捕获 rejection')
+  assert.match(settings, /loginFailureToast\(error\)/, '失败提示必须走统一函数')
+
+  const engine = readFileSync(join(root, 'src/lib/engine.ts'), 'utf8')
+  assert.match(engine, /loginFailureToast\(error\)/, '发消息前的登录失败也必须提示')
 })
