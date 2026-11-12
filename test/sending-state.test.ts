@@ -29,8 +29,7 @@ function read(relative: string): string {
  *
  * 按 /\r?\n/ 切行，不是 split('\n')：Windows 检出（core.autocrlf=true）拿到的是 CRLF，
  * 行尾的 \r 会让 `.*$` 匹配不上（\r 在 JS 正则里算行终止符，$ 又只认字符串末尾），
- * 于是整行注释原样留下 —— 注释里解释规矩的那句「…三个 await 留在 try 外面…」
- * 就会被当成真的 await，这条守卫在 CRLF 机器上必然误报。
+ * 于是整行注释原样留下 —— 注释里解释规矩的那些字眼就会被当成真的代码。
  */
 function stripComments(text: string): string {
   return text
@@ -45,31 +44,59 @@ const webChat = read('src/lib/web-chat.ts')
 const mcp = read('src/lib/mcp.ts')
 const store = read('src/lib/store.ts')
 
-test('P0-2：busy 一旦置位，到 try 之间不许有 await', () => {
-  const lines = engine.split('\n')
-  const starts: number[] = []
-  lines.forEach((line, index) => {
-    if (/^\s*busy = true\s*$/.test(line)) starts.push(index)
-  })
-  assert.ok(starts.length >= 3, `发送/重生成/编辑重发三处都该有 busy = true，实际 ${starts.length} 处`)
+test('P0-2 / T-08：五个入口都是「先占位、再做 await」', () => {
+  const code = stripComments(engine)
 
-  for (const start of starts) {
-    let tryLine = -1
-    for (let index = start + 1; index < lines.length; index += 1) {
-      if (/^\s*try \{\s*$/.test(lines[index] ?? '')) {
-        tryLine = index
-        break
-      }
-    }
-    assert.ok(tryLine > start, `第 ${start + 1} 行的 busy = true 之后必须紧跟 try {`)
-    // 注释里出现「await」是在解释这条规矩本身，先剥掉注释再判断。
-    const between = stripComments(lines.slice(start + 1, tryLine).join('\n'))
-    assert.equal(
-      /\bawait\b/.test(between),
-      false,
-      `第 ${start + 1} 行 busy = true 与 try 之间出现 await：异常会直接 reject，busy 永久泄漏\n${between}`,
-    )
+  // sendMessage 的编排搬进了 runSend：这里验证它把占位/释放交了出去，
+  // 真正「先占位再 await」的顺序由下面那段对 runSend 的断言守着。
+  const sendStart = code.indexOf('export async function sendMessage')
+  const sendBody = code.slice(sendStart, code.indexOf('export async function sendGroupMessage', sendStart))
+  assert.match(sendBody, /begin: beginTurn,/, 'sendMessage 把占位交给 runSend')
+  assert.match(sendBody, /end: endTurn,/, '释放也交给 runSend（里面带归属判断）')
+
+  const orchestrator = stripComments(read('src/lib/send-orchestrator.ts'))
+  const beginAt = orchestrator.indexOf('const turn = deps.begin()')
+  const firstAwait = orchestrator.indexOf('await ')
+  assert.ok(beginAt > 0 && firstAwait > beginAt, 'runSend 必须先占位再 await，否则双击能开出两轮')
+  assert.match(orchestrator, /if \(turn === null\) return \{ started: false/, '占位失败要直接退出')
+
+  for (const name of [
+    'export async function sendGroupMessage',
+    'export async function continueTurn',
+    'export async function regenerateAtMessage',
+    'export async function editAndResend',
+  ]) {
+    const start = code.indexOf(name)
+    assert.ok(start > 0, `找不到 ${name}`)
+    const body = code.slice(start, start + 2600)
+    const claim = body.indexOf('beginTurn()')
+    const guard = body.indexOf('if (turn === null)')
+    const firstAwait = body.indexOf('await ')
+    assert.ok(claim > 0, `${name} 必须用 beginTurn() 占住「正在发送」`)
+    assert.ok(guard > claim, `${name} 占位失败（已有一轮在跑）时必须直接退出`)
+    assert.ok(firstAwait === -1 || claim < firstAwait, `${name} 必须先占住 busy 再 await，否则双击能开出两轮`)
   }
+})
+
+test('P0-2 / T-08：beginTurn 与 endTurn 成对出现，busy / activeAbort 只在 turnGate 里改', () => {
+  const code = stripComments(engine)
+  // 四个入口直接调 beginTurn()/endTurn()，sendMessage 则把它们交给 runSend。
+  const begins = (code.match(/(?:= beginTurn\(\)|begin: beginTurn,)/g) ?? []).length
+  const ends = (code.match(/(?:endTurn\(turn\)|end: endTurn,)/g) ?? []).length
+  assert.ok(begins >= 5, `五个入口都要占位，实际只有 ${begins} 处`)
+  // 早退分支不再各自补 endTurn（准备阶段已并入 runSend 的主 try），所以两边应当一样多。
+  assert.equal(ends, begins, `endTurn（${ends}）必须和 beginTurn（${begins}）一样多`)
+  /*
+   * 核心不变量：engine 里不许再直接碰 busy / activeAbort。
+   * 它们搬进了 src/lib/turn-gate.ts —— 那里才有归属判断，也才能写行为测试。
+   * 散在 engine 里的 `busy = false` 就是「旧轮收尾把新轮状态清掉」的来源。
+   */
+  assert.doesNotMatch(code, /^\s*activeAbort = /m, 'activeAbort 只许在 turn-gate.ts 里改')
+  assert.doesNotMatch(code, /^\s*busy = /m, 'busy 只许在 turn-gate.ts 里改')
+
+  const gate = stripComments(read('src/lib/turn-gate.ts'))
+  assert.match(gate, /begin\(\): Turn \| null \{/, '占位逻辑在 turnGate.begin 里')
+  assert.match(gate, /if \(activeAbort !== turn\.abort\) return false/, '归属判断在 turnGate.end 里')
 })
 
 test('P0-2：每一处置位都要有对应的复位', () => {
@@ -80,7 +107,8 @@ test('P0-2：每一处置位都要有对应的复位', () => {
 
 test('P0-2：「停止」在没有请求在跑时也能强制复位', () => {
   assert.match(engine, /function resetSendingState\(\)/)
-  assert.match(engine, /if \(busy\) resetSendingState\(\)/)
+  assert.match(engine, /if \(turnGate\.isBusy\(\)\) resetSendingState\(\)/)
+  assert.match(engine, /turnGate\.abortCurrent\(\)/, '停止优先走「中止当前这一轮」')
 })
 
 test('P1-4：本轮对话的 signal 一路传到 MCP 工具调用', () => {

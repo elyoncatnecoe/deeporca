@@ -1,4 +1,4 @@
-import { generateImages, isImageConfigured, isSpeechConfigured, MediaApiError, synthesizeSpeech } from './media-api.ts'
+import { generateImages, isImageConfigured, isMediaAbort, isSpeechConfigured, MediaApiError, synthesizeSpeech } from './media-api.ts'
 import { mediaAltFromPrompt } from './media-store.ts'
 import type { ImageApiConfig, Settings, SpeechApiConfig } from './types'
 
@@ -179,6 +179,14 @@ async function runGenerateImage(args: Record<string, unknown>, context: MediaToo
       quality: config.quality,
       ...(referenceImages.length > 0 ? { referenceImages } : {}),
     }, context.signal)
+    /*
+     * 请求回来的时候用户可能已经按了停止。
+     * 这时不能再把图当成「生成成功」：一旦返回 media，engine 会把它写进库，
+     * 用户取消的那次生图就变成了永久残留（T-07）。
+     */
+    if (context.signal?.aborted === true) {
+      return { resultText: '已停止：这次生图被取消，没有保存图片。', media: [] }
+    }
     const media: MediaDraft[] = images.map((image) => ({
       kind: 'image',
       mime: image.mime,
@@ -194,6 +202,8 @@ async function runGenerateImage(args: Record<string, unknown>, context: MediaToo
       media,
     }
   } catch (error) {
+    // 取消不是「失败」：说清楚是用户停的，别让模型去重试一次已经取消的生图。
+    if (isMediaAbort(error)) return { resultText: '已停止：这次生图被取消。', media: [] }
     return { resultText: `生图失败：${errorText(error)}`, media: [] }
   }
 }
@@ -209,6 +219,10 @@ async function runSpeak(args: Record<string, unknown>, context: MediaToolContext
   const speed = clampFloat(args.speed, 0.5, 2, config.speed)
   try {
     const audio = await synthesizeSpeech({ ...config, speed }, text, context.signal)
+    // 同上：被停止的语音不要再落库（T-07）。
+    if (context.signal?.aborted === true) {
+      return { resultText: '已停止：这次语音生成被取消，没有保存音频。', media: [] }
+    }
     return {
       resultText: `已生成语音（${text.length} 字，${config.voice || '默认音色'}）。客户端已显示播放器，需要用户自己点播放。`,
       media: [{
@@ -220,6 +234,7 @@ async function runSpeak(args: Record<string, unknown>, context: MediaToolContext
       }],
     }
   } catch (error) {
+    if (isMediaAbort(error)) return { resultText: '已停止：这次语音生成被取消。', media: [] }
     return { resultText: `语音生成失败：${errorText(error)}`, media: [] }
   }
 }
