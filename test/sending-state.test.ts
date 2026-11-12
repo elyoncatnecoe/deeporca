@@ -24,11 +24,18 @@ function read(relative: string): string {
   return fs.readFileSync(path.join(root, relative), 'utf8')
 }
 
-/** 去掉行注释与块注释，避免注释里的字眼被当成代码。 */
+/**
+ * 去掉行注释与块注释，避免注释里的字眼被当成代码。
+ *
+ * 按 /\r?\n/ 切行，不是 split('\n')：Windows 检出（core.autocrlf=true）拿到的是 CRLF，
+ * 行尾的 \r 会让 `.*$` 匹配不上（\r 在 JS 正则里算行终止符，$ 又只认字符串末尾），
+ * 于是整行注释原样留下 —— 注释里解释规矩的那句「…三个 await 留在 try 外面…」
+ * 就会被当成真的 await，这条守卫在 CRLF 机器上必然误报。
+ */
 function stripComments(text: string): string {
   return text
     .replace(/\/\*[\s\S]*?\*\//g, '')
-    .split('\n')
+    .split(/\r?\n/)
     .map((line) => line.replace(/(^|[^:])\/\/.*$/, '$1'))
     .join('\n')
 }

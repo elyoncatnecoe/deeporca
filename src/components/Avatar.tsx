@@ -13,7 +13,12 @@ import { avatarStore, type AvatarRole } from '../lib/avatars'
 export function Avatar(props: {
   role: AvatarRole
   size?: number
-  className?: string
+  /*
+   * 以前这里有个 `className?: string`，全仓 13 处调用**没有一处**传它 ——
+   * 于是头像的类名被拼成 `className={className}`，CSS 守卫
+   * （test/css-class-audit.test.ts）读不出静态类名，只能报「无法解析」。
+   * 既然没人用，就把这个死参数去掉，类名改回字面量。
+   */
   /** 助手头像的解析结果（图片或 data URI）。传了就不走全局 assistant 头像。 */
   avatarSrc?: string
   /** 助手头像如果是 emoji，则用它渲染一个文字头像。 */
@@ -25,13 +30,12 @@ export function Avatar(props: {
     () => null,
   )
   const size = props.size ?? 20
-  const className = props.className === undefined ? 'avatar' : 'avatar ' + props.className
 
   // 助手自带 emoji 头像且没有可用的图片源：渲染文字头像。
   if (props.role === 'assistant' && (props.avatarSrc === undefined || props.avatarSrc === '') && props.emoji !== undefined && props.emoji !== '') {
     return (
       <span
-        className={className + ' avatar-emoji'}
+        className="avatar avatar-emoji"
         style={{ width: size + 'px', height: size + 'px', fontSize: Math.round(size * 0.62) + 'px' }}
         data-role={props.role}
         data-custom="false"
@@ -47,7 +51,7 @@ export function Avatar(props: {
     : (custom ?? DEFAULT_AVATARS[props.role])
   return (
     <img
-      className={className}
+      className="avatar"
       src={src}
       alt=""
       width={size}

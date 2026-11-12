@@ -3,7 +3,7 @@ import { ChevronDown, FileText, MessageCircle, Plus, Trash2, X } from 'lucide-re
 import { useAppStore } from '../lib/store'
 import { deleteSummary, getSummary, putSummary } from '../lib/db'
 import { Avatar, assistantAvatarProps } from './Avatar'
-import { IconButton } from './ui'
+import { IconButton, Select } from './ui'
 import { confirmDialog } from './ConfirmDialog'
 
 function dayLabel(timestamp: number): string {
@@ -115,7 +115,7 @@ export function HistoryDrawer() {
             <span>{visible.length} 段</span>
           </div>
           <div className="drawer-head-actions">
-            <IconButton label="新对话" onClick={() => void actions.createConversation()}>
+            <IconButton label="新对话" onClick={() => actions.setNewChatOpen(true)}>
               <Plus size={18} />
             </IconButton>
             <IconButton label="关闭" onClick={() => actions.setHistoryOpen(false)}>
@@ -123,14 +123,19 @@ export function HistoryDrawer() {
             </IconButton>
           </div>
         </header>
-        {/* 按助手筛选：群聊一多，光看标题很难找回「和 Clawd 聊过的那段」。 */}
+        {/* 按助手筛选：群聊一多，光看标题很难找回「和 Clawd 聊过的那段」。
+            用自绘的 Select，不用原生 <select>：Android WebView 的原生弹层不吃
+            color-scheme，会渲染成白底、选项文字看不见（UI 反馈 #1）。 */}
         <div className="drawer-filter">
-          <select value={filterId} onChange={(event) => setFilterId(event.target.value)} aria-label="按助手筛选">
-            <option value="">全部助手</option>
-            {settings.assistants.map((item) => (
-              <option key={item.id} value={item.id}>{item.name}</option>
-            ))}
-          </select>
+          <Select
+            value={filterId}
+            onChange={setFilterId}
+            ariaLabel="按助手筛选"
+            options={[
+              { value: '', label: '全部助手' },
+              ...settings.assistants.map((item) => ({ value: item.id, label: item.name })),
+            ]}
+          />
         </div>
         <div className="drawer-list">
           {visible.length === 0 && (

@@ -219,7 +219,11 @@ function offlineLine(): string {
  * body-control directives, and fold the result into memory.
  * @returns true once the user message was accepted (the composer may clear).
  */
-export async function sendMessage(text: string, attachments: Attachment[] = []): Promise<boolean> {
+export async function sendMessage(
+  text: string,
+  attachments: Attachment[] = [],
+  options: { onAccepted?: () => void } = {},
+): Promise<boolean> {
   const trimmed = text.trim()
   if ((trimmed === '' && attachments.length === 0) || busy) return false
   if (attachments.length > MAX_ATTACHMENTS) {
@@ -296,6 +300,8 @@ export async function sendMessage(text: string, attachments: Attachment[] = []):
     }
     await store.actions.appendMessage(userMessage)
     accepted = true
+    // 用户消息已落库：立刻通知调用方（输入框可以在这一刻清空，不必等整轮生成结束）。
+    options.onAccepted?.()
 
     const attachmentTitle = attachments[0]?.name
     const titleSource = trimmed !== '' ? trimmed : attachmentTitle ?? '新的对话'
@@ -370,7 +376,11 @@ export async function sendMessage(text: string, attachments: Attachment[] = []):
  * planGroupRound 排出的顺序逐个跑 runAssistantTurn（每个都带着 respondAs）。
  * 被点名的助手一定开口；其余成员可以在允许时选择 <pass/> 跳过，省 token。
  */
-export async function sendGroupMessage(text: string, attachments: Attachment[] = []): Promise<boolean> {
+export async function sendGroupMessage(
+  text: string,
+  attachments: Attachment[] = [],
+  options: { onAccepted?: () => void } = {},
+): Promise<boolean> {
   const trimmed = text.trim()
   if ((trimmed === '' && attachments.length === 0) || busy) return false
   const store = useAppStore.getState()
@@ -390,17 +400,17 @@ export async function sendGroupMessage(text: string, attachments: Attachment[] =
     || !hasApiKey(settings)
     || isWebChatProvider(settings)
   ) {
-    return sendMessage(text, attachments)
+    return sendMessage(text, attachments, options)
   }
 
   const members = (conversation.members ?? [])
     .map((id) => settings.assistants.find((item) => item.id === id))
     .filter((item): item is Assistant => item !== undefined)
-  if (members.length === 0) return sendMessage(text, attachments)
+  if (members.length === 0) return sendMessage(text, attachments, options)
 
   const groupSettings = conversation.groupSettings ?? { gapMs: 1500, allowChatter: false, maxTurnsPerRound: 3 }
   const { speakers, named } = planGroupRound(members, trimmed, groupSettings)
-  if (speakers.length === 0) return sendMessage(text, attachments)
+  if (speakers.length === 0) return sendMessage(text, attachments, options)
 
   busy = true
   activeAbort = new AbortController()
@@ -423,6 +433,8 @@ export async function sendGroupMessage(text: string, attachments: Attachment[] =
     }
     await store.actions.appendMessage(userMessage)
     accepted = true
+    // 用户消息已落库：立刻通知调用方清空输入框（群聊同样要立刻清）。
+    options.onAccepted?.()
     store.actions.setSending(true, conversationId)
 
     if (conversation.title === '新的对话') {

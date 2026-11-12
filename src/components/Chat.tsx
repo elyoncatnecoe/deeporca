@@ -44,14 +44,14 @@ import {
   messageMarkdownFileName,
   messageToMarkdown,
 } from '../lib/export-markdown'
-import { shareMarkdown } from '../lib/platform'
+import { shareMarkdown, writeClipboardText } from '../lib/platform'
+import { createComposerClear } from '../lib/composer-clear'
 import { webChatAvailable } from '../lib/web-chat'
 import { ExportDialog } from './ExportDialog'
 import { SaveToWorkshopDialog, type SnippetDraft } from './SaveToWorkshop'
 import type { Attachment, ChatMessage, Settings, ThinkingEffort } from '../lib/types'
 import { CodeRunModal } from './CodeRunModal'
 import { CompressDialog } from './CompressDialog'
-import { NewChatSheet } from './NewChatSheet'
 import { SearchPanel } from './SearchPanel'
 import { MediaToolCard } from './MediaToolCard'
 import { SpeechButton } from './SpeechButton'
@@ -337,12 +337,16 @@ function Bubble(props: {
   }
 
   const copy = async (): Promise<void> => {
-    try {
-      await navigator.clipboard.writeText(message.content)
-      actions.showToast('已复制')
-    } catch {
-      actions.showToast('复制失败')
-    }
+    /*
+     * 必须走 platform.writeClipboardText，不能直接用 navigator.clipboard。
+     *
+     * 真机上「点复制失败」的根因就在这里：Android WebView 里
+     * navigator.clipboard.writeText 经常直接 reject（非安全上下文 / 没有剪贴板权限），
+     * 而 writeClipboardText 在安卓上会先走原生 ClipboardManager（DeepSeaClipboard 插件），
+     * 失败才落回网页实现。项目里其他复制入口（助手页、选中复制条）早就用的是它。
+     */
+    const ok = await writeClipboardText(message.content)
+    actions.showToast(ok ? '已复制' : '复制失败，可以长按选中再复制')
   }
 
   const startEdit = (): void => {
@@ -599,7 +603,6 @@ export function Chat() {
   const [exportOpen, setExportOpen] = useState(false)
   const [snippetDraft, setSnippetDraft] = useState<SnippetDraft | null>(null)
   const [searchOpen, setSearchOpen] = useState(false)
-  const [newChatOpen, setNewChatOpen] = useState(false)
   const [flashId, setFlashId] = useState<string | null>(null)
   const turns = useMemo(() => buildTurns(messages), [messages])
   const [activeAnchor, setActiveAnchor] = useState<string | null>(null)
@@ -609,6 +612,17 @@ export function Chat() {
   const [input, setInput] = useState('')
   const [runner, setRunner] = useState<{ code: string; lang: string } | null>(null)
   const [attachments, setAttachments] = useState<Attachment[]>([])
+  /*
+   * 附件列表的实时镜像。
+   *
+   * 清空输入框发生在异步回调里（engine 落库之后 / 整轮生成结束之后），
+   * 那时闭包里的 `attachments` 还是点击发送那一次渲染的值 —— 用它做「有没有变化」
+   * 的判断永远是「没变」，用户生成期间新加 / 替换的附件就会被一起清掉。
+   */
+  const attachmentsRef = useRef<Attachment[]>([])
+  useEffect(() => {
+    attachmentsRef.current = attachments
+  }, [attachments])
   const [preparing, setPreparing] = useState(false)
   const [dragActive, setDragActive] = useState(false)
   const [thinkingOpen, setThinkingOpen] = useState(false)
@@ -1027,25 +1041,53 @@ export function Chat() {
     const text = input.trim()
     if ((text === '' && attachments.length === 0) || sending || preparing) return
     let accepted = false
+    /*
+     * 用户消息一旦「成功落库」就立刻清空输入框 —— 这是 UI 反馈 #4 的要点。
+     *
+     * 以前是等 `await sendMessage()` 返回后才清，而 sendMessage 内部要
+     * `await runAssistantTurn()`（整轮回复生成完才返回），于是「正在回应」的
+     * 整段时间里，输入框都还留着刚发出去的那句话（截图里那个「暂留」）。
+     *
+     * 现在改成 engine 在 accepted 那一刻回调 onAccepted；「清不清、还能不能再清」
+     * 的决策收在 createComposerClear 里（src/lib/composer-clear.ts）：
+     *   - 主清空只要触发过，结尾的兜底就不再执行 —— 否则用户在生成期间重新敲出
+     *     同样的文本，兜底会把这份新输入删掉（审查意见 P1）；
+     *   - 兜底只服务本地指令 / 离线回复这类不走 onAccepted 的即时成功路径；
+     *   - 清空前要求文本与附件都还是发送时那份，不误删用户新加的东西。
+     */
+    const composer = createComposerClear({
+      /*
+       * 快照存的是**附件身份**（Attachment.id），不是数量。
+       * 只比数量的话，用户「删掉图 A 换成图 B」时数量仍是 1，会被误判成没变，
+       * 于是把 B 一起清掉（二审 P1）。
+       */
+      sent: { text, attachmentIds: attachments.map((item) => item.id) },
+      read: () => ({
+        text: inputRef.current?.value.trim() ?? '',
+        attachmentIds: attachmentsRef.current.map((item) => item.id),
+      }),
+      clear: () => {
+        setInput('')
+        setAttachments([])
+        // 自己发的消息一定要看到：把「贴底」打开，否则用户之前往上翻过的话，
+        // 新消息会安静地落在下面看不见。
+        stickToBottom.current = true
+        requestAnimationFrame(resizeInput)
+      },
+    })
     try {
       // 群聊走 sendGroupMessage（一个接一个说）；单聊仍走 sendMessage。
       const active = useAppStore.getState().conversations.find((item) => item.id === useAppStore.getState().activeId)
       accepted = active?.kind === 'group'
-        ? await sendGroupMessage(text, attachments)
-        : await sendMessage(text, attachments)
+        ? await sendGroupMessage(text, attachments, { onAccepted: composer.onAccepted })
+        : await sendMessage(text, attachments, { onAccepted: composer.onAccepted })
     } catch (error) {
       // engine 内部已经用 finally 兜住了发送状态；这里只防「连兜底都抛了」的极端情况，
       // 至少要让用户知道这次没发出去，而不是看着输入框发呆。
       actions.showToast(error instanceof Error ? error.message : '没发出去，再试一次')
     }
-    if (accepted) {
-      setInput('')
-      setAttachments([])
-      // 自己发的消息一定要看到：把「贴底」打开，否则用户之前往上翻过的话，
-      // 新消息会安静地落在下面看不见。
-      stickToBottom.current = true
-      requestAnimationFrame(resizeInput)
-    }
+    // 兜底：只处理没有触发 onAccepted 的即时成功路径（本地指令 / 离线回复）。
+    composer.settle(accepted)
   }
 
   function cycleSheet(): void {
@@ -1265,7 +1307,7 @@ export function Chat() {
             <IconButton label="历史对话" onClick={() => actions.setHistoryOpen(true)}>
               <History size={18} />
             </IconButton>
-            <IconButton label="新对话（可选群聊）" onClick={() => setNewChatOpen(true)}>
+            <IconButton label="新对话（可选群聊）" onClick={() => actions.setNewChatOpen(true)}>
               <Plus size={18} />
             </IconButton>
           </div>
@@ -1657,7 +1699,6 @@ export function Chat() {
         preselectIds={exportIds ?? undefined}
       />
       <SaveToWorkshopDialog draft={snippetDraft} onClose={() => setSnippetDraft(null)} />
-      <NewChatSheet open={newChatOpen} onClose={() => setNewChatOpen(false)} />
     </div>
   )
 }
