@@ -1,9 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { registerHooks } from 'node:module'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 /**
  * P1-2 的**调用链**测试：save() 双重失败 → 抛 SessionRemoveError → IPC 层转成
@@ -143,6 +146,18 @@ test('C5 前端映射：失败原因一路变成 UI 文案', () => {
   assert.match(login.message ?? '', new RegExp(STALE_SESSION_CLEANUP_FAILED))
   assert.match(toast, new RegExp(STALE_SESSION_CLEANUP_FAILED), 'UI 文案必须包含指定提示')
   assert.doesNotMatch(toast, /已连接|已清除/, '不能显示成功提示')
+})
+
+test('C7 UI 接线：Settings 页确实把结果交给 loginResultToast，并捕获 rejection', () => {
+  /*
+   * 这是整条链上**唯一无法在 node 里执行**的一跳（React 组件渲染）。
+   * 所以这里只做结构断言，并在报告里如实标注为「未执行渲染」，
+   * 不把它算作端到端验证。
+   */
+  const settings = readFileSync(join(root, 'src/components/Settings.tsx'), 'utf8')
+  assert.match(settings, /showToast\(loginResultToast\(result\)\)/, 'UI 必须用统一文案函数显示结果')
+  assert.match(settings, /\.catch\(/, 'UI 必须捕获 IPC rejection，不能静默丢弃')
+  assert.doesNotMatch(settings, /result\.ok \? '网页账号已连接/, '不能残留旧的「成功就报已连接」内联文案')
 })
 
 test('C6 完整链路：save → capture → IPC 响应 → UI 文案（一次跑通）', async () => {
