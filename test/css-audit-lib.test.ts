@@ -141,6 +141,65 @@ test('P2-2：三元里的比较值不是类名', () => {
 })
 
 /* ------------------------------------------------------------------ */
+/* 二审 P2：一个字符串都提不出来的表达式，不许「扫了个空 = 通过」          */
+/* ------------------------------------------------------------------ */
+
+test('二审 P2：className={buttonClass} 判为无法解析', () => {
+  const scan = scanClassNames('{buttonClass}')
+  assert.equal(scan.unresolved, true, '一个字符串都提不出来，不能当成没问题')
+  assert.deepEqual(scan.static, [])
+})
+
+test('二审 P2：className={getButtonClass()} 判为无法解析', () => {
+  const scan = scanClassNames('{getButtonClass()}')
+  assert.equal(scan.unresolved, true, '函数调用返回什么类名，静态分析不知道')
+  assert.deepEqual(scan.static, [])
+})
+
+test('二审 P2：className={props.className} 判为无法解析', () => {
+  const scan = scanClassNames('{props.className}')
+  assert.equal(scan.unresolved, true)
+})
+
+test('二审 P2：三元里混着成员访问 —— 静态分支照查，动态那半边报 unresolved', () => {
+  const scan = scanClassNames("{condition ? styles.active : 'normal'}")
+  assert.deepEqual(scan.static, ['normal'], '能确认的静态分支仍然要提取并检查')
+  assert.equal(scan.unresolved, true, "styles.active 拼出什么，静态分析不知道")
+})
+
+test('二审 P2：纯静态的三元不报 unresolved（条件本身不是类名）', () => {
+  const scan = scanClassNames("{condition ? 'active' : 'normal'}")
+  assert.deepEqual([...scan.static].sort(), ['active', 'normal'])
+  assert.equal(scan.unresolved, false)
+})
+
+test('二审 P2：布尔守卫（cond && 字面量）不算动态残留', () => {
+  const scan = scanClassNames("{on && 'is-on'}")
+  assert.deepEqual(scan.static, ['is-on'])
+  assert.equal(scan.unresolved, false, 'on 产出的是布尔值，不是类名')
+})
+
+test('二审 P2：报告能给出文件、行号和原始表达式', () => {
+  const text = [
+    '<a className="ok" />',
+    '<b className={buttonClass} />',
+    '',
+    '<c className={getButtonClass()} />',
+    '<d className={condition ? styles.active : \'normal\'} />',
+  ].join('\n')
+  const bad = extractClassNameExpressions(text)
+    .map((item) => ({ item, scan: scanClassNames(item.raw) }))
+    .filter((entry) => entry.scan.unresolved)
+
+  assert.deepEqual(bad.map((entry) => entry.item.line), [2, 4, 5], '行号要对得上')
+  assert.deepEqual(bad.map((entry) => entry.item.raw), [
+    '{buttonClass}',
+    '{getButtonClass()}',
+    "{condition ? styles.active : 'normal'}",
+  ], '原文要能直接贴出来给人看')
+})
+
+/* ------------------------------------------------------------------ */
 /* 扫描器本身                                                          */
 /* ------------------------------------------------------------------ */
 

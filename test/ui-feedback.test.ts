@@ -161,11 +161,12 @@ test('④ Chat 不再在 await 之后无条件清空输入框', () => {
   assert.match(code, /composer\.settle\(accepted\)/, '结尾只保留兜底入口，不再直接调清空')
 })
 
-test('④ 清空判定要求「文本与附件都还是发送时那份」，且主清空触发后不再兜底', () => {
+test('④ 清空判定要求「文本与附件身份都还是发送时那份」，且主清空触发后不再兜底', () => {
   const lib = read('src/lib/composer-clear.ts')
   assert.match(lib, /now\.text !== options\.sent\.text/, '文本变了就不清')
-  assert.match(lib, /now\.attachments !== options\.sent\.attachments/, '附件变了也不清（别误删用户新加的）')
+  assert.match(lib, /sameAttachmentIds\(now\.attachmentIds, options\.sent\.attachmentIds\)/, '附件要比身份列表，不是比数量')
   assert.match(lib, /if \(fired\) return/, '主清空触发过之后，兜底不许再执行（审查意见 P1）')
+  assert.match(read('src/components/Chat.tsx'), /attachmentIds: attachments\.map\(\(item\) => item\.id\)/, '快照要存 Attachment.id 列表')
 })
 
 /* ------------------------------------------------------------------ */

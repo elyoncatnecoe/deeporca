@@ -340,17 +340,17 @@ export function CalendarScreen() {
                   if (day === null) return <span key={`blank-${index}`} className="calendar-cell is-empty" />
                   const dayStart = new Date(cursor.year, cursor.month, day).getTime()
                   const dayNotes = notesByDay.get(dayStart) ?? []
-                  const classes = [
-                    'calendar-cell',
-                    dayStart === today ? 'is-today' : '',
-                    dayStart === selectedDay ? 'is-selected' : '',
-                    dayNotes.length > 0 ? 'has-notes' : '',
-                  ].filter(Boolean).join(' ')
+                  /*
+                   * 类名直接写在属性里，不用中间变量：CSS 守卫（test/css-class-audit.test.ts）
+                   * 只能静态分析属性表达式，`className={classes}` 它读不出任何类名，
+                   * 会按「无法解析」报出来。写开之后 is-today / is-selected / has-notes
+                   * 都能逐条核对；空串留下的多余空格对 classList 没有影响。
+                   */
                   return (
                     <button
                       key={day}
                       type="button"
-                      className={classes}
+                      className={`calendar-cell ${dayStart === today ? 'is-today' : ''} ${dayStart === selectedDay ? 'is-selected' : ''} ${dayNotes.length > 0 ? 'has-notes' : ''}`}
                       onClick={() => setSelectedDay(dayStart)}
                     >
                       <span className="calendar-cell-day">{day}</span>

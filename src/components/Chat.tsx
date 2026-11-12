@@ -613,11 +613,11 @@ export function Chat() {
   const [runner, setRunner] = useState<{ code: string; lang: string } | null>(null)
   const [attachments, setAttachments] = useState<Attachment[]>([])
   /*
-   * 附件数的实时镜像。
+   * 附件列表的实时镜像。
    *
    * 清空输入框发生在异步回调里（engine 落库之后 / 整轮生成结束之后），
    * 那时闭包里的 `attachments` 还是点击发送那一次渲染的值 —— 用它做「有没有变化」
-   * 的判断永远是「没变」，用户生成期间新加的附件就会被一起清掉。
+   * 的判断永远是「没变」，用户生成期间新加 / 替换的附件就会被一起清掉。
    */
   const attachmentsRef = useRef<Attachment[]>([])
   useEffect(() => {
@@ -1056,8 +1056,16 @@ export function Chat() {
      *   - 清空前要求文本与附件都还是发送时那份，不误删用户新加的东西。
      */
     const composer = createComposerClear({
-      sent: { text, attachments: attachments.length },
-      read: () => ({ text: inputRef.current?.value.trim() ?? '', attachments: attachmentsRef.current.length }),
+      /*
+       * 快照存的是**附件身份**（Attachment.id），不是数量。
+       * 只比数量的话，用户「删掉图 A 换成图 B」时数量仍是 1，会被误判成没变，
+       * 于是把 B 一起清掉（二审 P1）。
+       */
+      sent: { text, attachmentIds: attachments.map((item) => item.id) },
+      read: () => ({
+        text: inputRef.current?.value.trim() ?? '',
+        attachmentIds: attachmentsRef.current.map((item) => item.id),
+      }),
       clear: () => {
         setInput('')
         setAttachments([])

@@ -297,12 +297,13 @@ function parseTemplate(text: string, start: number, end: number): { segments: st
 
 function visitTemplate(segments: string[], exprs: string[], out: TokenScan): void {
   const before = { static: out.static.length, prefixes: out.prefixes.length, suffixes: out.suffixes.length }
+  let innerUnresolved = false
   for (const expr of exprs) {
     const inner = scanClassNames(expr)
     out.static.push(...inner.static)
     out.prefixes.push(...inner.prefixes)
     out.suffixes.push(...inner.suffixes)
-    if (inner.unresolved) out.unresolved = true
+    if (inner.unresolved) innerUnresolved = true
   }
   if (segments.length === 1) {
     pushPlain(segments[0] ?? '', out)
@@ -342,7 +343,78 @@ function visitTemplate(segments: string[], exprs: string[], out: TokenScan): voi
   const learned = out.static.length > before.static
     || out.prefixes.length > before.prefixes
     || out.suffixes.length > before.suffixes
-  if (!learned && !out.unresolved) out.unresolved = true
+  if (!learned) {
+    out.unresolved = true
+    return
+  }
+  /*
+   * 插值里是动态值（`theme-${tone.id}`、`tier-${level}`）时，只要它**贴着**一个
+   * 已解析的前缀 / 后缀，就由前缀/后缀检查兜住 —— 那正是 prefix/suffix 机制存在的意义，
+   * 不重复报 unresolved。反过来，`item ${cls}` 这种插值是独立一段的，仍然要报。
+   */
+  const anchored = out.prefixes.length > before.prefixes || out.suffixes.length > before.suffixes
+  if (innerUnresolved && !anchored) out.unresolved = true
+}
+
+const KEYWORDS = new Set(['typeof', 'instanceof', 'new', 'void', 'delete', 'in', 'of', 'true', 'false', 'null', 'undefined', 'return'])
+
+const COMPARISONS = ['===', '!==', '==', '!=', '<=', '>=', '<', '>']
+
+/**
+ * 把表达式里的字符串 / 模板 / 正则整体换成占位符，剩下「骨架」。
+ * 用来回答一个问题：除了已经识别出来的字面量，还有没有别的值在拼类名？
+ */
+function skeletonOf(text: string, skip: SkipTable): string {
+  let out = ''
+  let i = 0
+  while (i < text.length) {
+    const end = skip.end[i]
+    if (end > 0 && (text[i] === "'" || text[i] === '"' || text[i] === '`' || text[i] === '/')) {
+      // 占位符里不能有字母，否则会被下面的标识符正则当成变量名。
+      out += '«»'
+      i = end
+      continue
+    }
+    out += text[i]
+    i += 1
+  }
+  return out
+}
+
+/**
+ * 骨架里还有没有「可能产出类名」的标识符 / 成员访问 / 函数调用。
+ *
+ * 明确放过的三类（它们产出的是布尔值或比较结果，不是类名）：
+ *   - 三元条件：`cond ? … : …` 里的 `cond`；
+ *   - 比较运算的两侧：`mode === 'group'` 里的 `mode`；
+ *   - 逻辑非的操作数：`!open && …` 里的 `open`。
+ *
+ * 其余一律算残留 —— 包括 `buttonClass`、`getButtonClass()`、`styles.active`。
+ * 这正是二审指出的漏报：以前这些表达式因为「没提取到字符串」被当成通过。
+ */
+function hasDynamicResidue(skeleton: string): boolean {
+  const identRe = /[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*/g
+  let match: RegExpExecArray | null
+  while ((match = identRe.exec(skeleton)) !== null) {
+    const chain = match[0]
+    const first = chain.split('.')[0].trim()
+    if (KEYWORDS.has(first)) continue
+
+    const before = skeleton.slice(0, match.index).trimEnd()
+    const after = skeleton.slice(match.index + chain.length).trimStart()
+
+    // 可选链 `a?.b` 不是三元
+    const isOptionalChain = after.startsWith('?.')
+    if (!isOptionalChain && after.startsWith('?')) continue
+    if (COMPARISONS.some((op) => after.startsWith(op))) continue
+    if (COMPARISONS.some((op) => before.endsWith(op))) continue
+    if (before.endsWith('!')) continue
+    // `cond && 'x'` / `cond || 'x'` 里的 cond 是布尔守卫，不是类名
+    if (after.startsWith('&&') || after.startsWith('||')) continue
+
+    return true
+  }
+  return false
 }
 
 /**
@@ -385,6 +457,16 @@ export function scanClassNames(expression: string): TokenScan {
     }
     i += 1
   }
+
+  /*
+   * 字面量之外还有没有别的东西在拼类名。
+   *
+   * `className={buttonClass}` / `className={getButtonClass()}` 这种一个字符串都提不出来的，
+   * 以前会「什么都没扫到 = 没问题」地悄悄放过；`condition ? styles.active : 'normal'`
+   * 这种混着静态分支的，也要在检查 'normal' 的同时把动态那半边报出来。
+   */
+  if (hasDynamicResidue(skeletonOf(cleaned, skip))) out.unresolved = true
+
   return {
     static: [...new Set(out.static)],
     prefixes: [...new Set(out.prefixes)],
