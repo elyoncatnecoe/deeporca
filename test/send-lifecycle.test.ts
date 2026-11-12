@@ -4,20 +4,19 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createTurnGate } from '../src/lib/turn-gate.ts'
-import { DEFAULT_LOGIN_HINT, ensureWebChatLogin } from '../src/lib/web-login-step.ts'
+import type { Turn } from '../src/lib/turn-gate.ts'
+import { runSend, type RunSendDeps } from '../src/lib/send-orchestrator.ts'
 
 /**
- * 发送生命周期：占位 → 准备（含网页登录）→ 释放。
+ * 发送取消语义的回归测试 —— 跑的是**生产代码里那一个** runSend。
  *
- * 二审 P1 报的是：`await loginWebChat()` 没有异常保护，它 reject 之后 `endTurn`
- * 轮不到执行，`busy` 永远停在 true，发送键卡成「停止」，只能重启进程。
+ * 前两轮的测试在测试文件里自己实现了一遍发送流程（attemptSend），三审指出：
+ * 那证明的是测试代码，不是业务接线。所以第三轮把业务编排抽成了
+ * `src/lib/send-orchestrator.ts`，engine.sendMessage 直接调它；这里的每一个用例
+ * 都是拿假依赖调**同一个** runSend。
  *
- * engine.ts 依赖 IndexedDB 与 Capacitor，node 里跑不起来，所以把这段状态机拆成了
- * 两个模块（`src/lib/turn-gate.ts` / `src/lib/web-login-step.ts`），这里用**真实异步**
- * 跑一遍：断言的是 gate 的实际状态（isBusy / current），不是源码字符串。
- *
- * sendMessage 本身与这两个模块的接线（只有一个 try/finally、endTurn 只在 finally 里）
- * 由本文件最后一条结构断言守着 —— 那条是补充，不是替代。
+ * 关键断言是**副作用**：commit 有没有被调用（它内部才是建会话 / 写用户消息 /
+ * onAccepted / 起模型请求），notify 有没有弹提示，而不是只看 turnGate.isBusy()。
  */
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -27,7 +26,6 @@ function read(relative: string): string {
   return fs.readFileSync(path.join(root, relative), 'utf8')
 }
 
-/** 去掉注释再数，免得注释里提到的 beginTurn() / endTurn() 被算进去。 */
 function stripComments(text: string): string {
   return text
     .replace(/\/\*[\s\S]*?\*\//g, '')
@@ -36,143 +34,6 @@ function stripComments(text: string): string {
     .join('\n')
 }
 
-interface SendOptions {
-  webChatReady?: () => Promise<boolean>
-  loginWebChat?: () => Promise<{ ok: boolean; message?: string }>
-  /** 准备阶段跑完之后、释放之前要做的额外动作（模拟取消等） */
-  during?: (signal: AbortSignal) => Promise<void>
-}
-
-type SendResult =
-  | { started: false; outcome: 'busy' }
-  | { started: true; outcome: 'ready'; justLoggedIn: boolean }
-  | { started: true; outcome: 'blocked'; message: string }
-
-/**
- * 按 sendMessage 现在的顺序跑一轮：先 begin，准备阶段放在同一个 try 里，
- * 释放只由 finally 负责。prepare 抛错时不吞，直接往外冒。
- */
-async function attemptSend(
-  gate: ReturnType<typeof createTurnGate>,
-  options: SendOptions = {},
-): Promise<SendResult> {
-  const turn = gate.begin()
-  if (turn === null) return { started: false, outcome: 'busy' }
-  try {
-    const outcome = await ensureWebChatLogin({
-      webChatReady: options.webChatReady ?? (async () => true),
-      loginWebChat: options.loginWebChat ?? (async () => ({ ok: true })),
-    })
-    if (outcome.kind === 'blocked') {
-      return { started: true, outcome: 'blocked', message: outcome.message }
-    }
-    if (options.during !== undefined) await options.during(turn.abort.signal)
-    return { started: true, outcome: 'ready', justLoggedIn: outcome.justLoggedIn }
-  } finally {
-    gate.end(turn)
-  }
-}
-
-/* ------------------------------------------------------------------ */
-/* 1. 登录已就绪：不触发登录，流程继续                                   */
-/* ------------------------------------------------------------------ */
-
-test('P1：登录态已就绪时不会多走一次登录，流程继续', async () => {
-  const gate = createTurnGate()
-  let loginCalls = 0
-  const result = await attemptSend(gate, {
-    webChatReady: async () => true,
-    loginWebChat: async () => {
-      loginCalls += 1
-      return { ok: true }
-    },
-  })
-
-  assert.deepEqual(result, { started: true, outcome: 'ready', justLoggedIn: false })
-  assert.equal(loginCalls, 0, '已经就绪就不该再弹登录')
-  assert.equal(gate.isBusy(), false, '跑完必须释放')
-})
-
-/* ------------------------------------------------------------------ */
-/* 2. 登录成功：流程继续                                               */
-/* ------------------------------------------------------------------ */
-
-test('P1：登录成功后流程继续，并标记「刚登录」', async () => {
-  const gate = createTurnGate()
-  const result = await attemptSend(gate, {
-    webChatReady: async () => false,
-    loginWebChat: async () => ({ ok: true }),
-  })
-
-  assert.deepEqual(result, { started: true, outcome: 'ready', justLoggedIn: true })
-  assert.equal(gate.isBusy(), false)
-})
-
-/* ------------------------------------------------------------------ */
-/* 3. 登录返回 ok:false：释放 busy，返回失败                            */
-/* ------------------------------------------------------------------ */
-
-test('P1：登录返回 ok:false 时正常释放 busy，并把原因带回去', async () => {
-  const gate = createTurnGate()
-  const result = await attemptSend(gate, {
-    webChatReady: async () => false,
-    loginWebChat: async () => ({ ok: false, message: '登录窗口被关掉了' }),
-  })
-
-  assert.equal(result.outcome, 'blocked')
-  assert.equal((result as { message: string }).message, '登录窗口被关掉了')
-  assert.equal(gate.isBusy(), false, '没登录成也要释放，否则发送键卡死')
-})
-
-test('P1：登录失败但对方没给原因时用默认文案', async () => {
-  const gate = createTurnGate()
-  const result = await attemptSend(gate, {
-    webChatReady: async () => false,
-    loginWebChat: async () => ({ ok: false }),
-  })
-  assert.equal((result as { message: string }).message, DEFAULT_LOGIN_HINT)
-})
-
-/* ------------------------------------------------------------------ */
-/* 4. 登录 reject：异常路径也释放 busy                                  */
-/* ------------------------------------------------------------------ */
-
-test('P1：loginWebChat reject 时异常照原样抛出，但 busy 仍然释放', async () => {
-  const gate = createTurnGate()
-  const boom = new Error('IPC 断了')
-
-  await assert.rejects(
-    attemptSend(gate, {
-      webChatReady: async () => false,
-      loginWebChat: async () => {
-        throw boom
-      },
-    }),
-    (error: unknown) => error === boom,
-    '异常不能被吞掉，调用方要能拿到原始错误',
-  )
-
-  assert.equal(gate.isBusy(), false, '这就是二审报的 bug：异常路径不释放，发送键永久卡死')
-  assert.equal(gate.current(), null)
-})
-
-test('P1：webChatReady reject 同样释放 busy', async () => {
-  const gate = createTurnGate()
-  await assert.rejects(
-    attemptSend(gate, {
-      webChatReady: async () => {
-        throw new Error('bridge 未就绪')
-      },
-    }),
-  )
-  assert.equal(gate.isBusy(), false)
-})
-
-/* ------------------------------------------------------------------ */
-/* 5. 登录期间触发取消                                                 */
-/* ------------------------------------------------------------------ */
-
-/** 手动控制何时 resolve 的 promise，用来卡住「登录进行中」这个状态。 */
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   let resolve!: (value: T) => void
   const promise = new Promise<T>((res) => {
@@ -181,109 +42,278 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   return { promise, resolve }
 }
 
-test('P1：登录进行中被「停止」，不遗留 busy，也不误清下一轮', async () => {
-  const gate = createTurnGate()
-  const login = deferred<{ ok: boolean }>()
+const tick = (): Promise<void> => new Promise<void>((resolve) => setTimeout(resolve, 5))
 
-  const pending = attemptSend(gate, {
+/** commit 内部会做的四件事 —— 用它们代表「消息真的发出去了」。 */
+interface CommitEffects {
+  createdConversation: number
+  appendedUserMessage: number
+  accepted: number
+  startedGeneration: number
+}
+
+interface Harness {
+  gate: ReturnType<typeof createTurnGate>
+  turns: Turn[]
+  effects: CommitEffects
+  notices: string[]
+  loginCalls: number
+  settleCalls: number
+  deps: RunSendDeps
+}
+
+function harness(overrides: Partial<RunSendDeps> = {}): Harness {
+  const gate = createTurnGate()
+  const turns: Turn[] = []
+  const effects: CommitEffects = {
+    createdConversation: 0,
+    appendedUserMessage: 0,
+    accepted: 0,
+    startedGeneration: 0,
+  }
+  const notices: string[] = []
+  const state: Harness = {
+    gate,
+    turns,
+    effects,
+    notices,
+    loginCalls: 0,
+    settleCalls: 0,
+    deps: undefined as unknown as RunSendDeps,
+  }
+
+  state.deps = {
+    begin: () => {
+      const turn = gate.begin()
+      if (turn !== null) turns.push(turn)
+      return turn
+    },
+    end: (turn) => {
+      gate.end(turn)
+    },
+    runLocalCommand: async () => false,
+    runOfflineReply: async () => true,
+    hasApiKey: true,
+    isWebChatProvider: true,
+    webChatReady: async () => true,
+    loginWebChat: async () => {
+      state.loginCalls += 1
+      return { ok: true }
+    },
+    notify: (message) => {
+      notices.push(message)
+    },
+    commit: async () => {
+      // 模拟真实 commit 的副作用顺序：建会话 → 写用户消息 → onAccepted → 起生成
+      effects.createdConversation += 1
+      effects.appendedUserMessage += 1
+      effects.accepted += 1
+      effects.startedGeneration += 1
+      return true
+    },
+    settle: () => {
+      state.settleCalls += 1
+    },
+    ...overrides,
+  }
+  return state
+}
+
+function assertNoSendHappened(effects: CommitEffects): void {
+  assert.deepEqual(
+    effects,
+    { createdConversation: 0, appendedUserMessage: 0, accepted: 0, startedGeneration: 0 },
+    '取消 / 失败之后不许建会话、写用户消息、触发 onAccepted 或起模型请求',
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/* 正常路径                                                            */
+/* ------------------------------------------------------------------ */
+
+test('正常路径：commit 被调用一次，accepted 透传，收尾执行一次', async () => {
+  const h = harness()
+  const outcome = await runSend(h.deps)
+
+  assert.deepEqual(outcome, { started: true, accepted: true, cancelled: false })
+  assert.equal(h.effects.startedGeneration, 1)
+  assert.equal(h.settleCalls, 1)
+  assert.equal(h.gate.isBusy(), false)
+})
+
+test('登录态已就绪时不会多走一次登录', async () => {
+  const h = harness({ webChatReady: async () => true })
+  await runSend(h.deps)
+  assert.equal(h.loginCalls, 0)
+  assert.equal(h.effects.startedGeneration, 1)
+})
+
+test('登录成功时提示「已连接」，流程继续', async () => {
+  const h = harness({ webChatReady: async () => false })
+  await runSend(h.deps)
+  assert.equal(h.loginCalls, 1)
+  assert.deepEqual(h.notices, ['网页账号已连接；以后不用再登录了'])
+  assert.equal(h.effects.startedGeneration, 1)
+})
+
+/* ------------------------------------------------------------------ */
+/* 三审 P1：等待期间取消，不许继续发                                     */
+/* ------------------------------------------------------------------ */
+
+test('三审 P1：webChatReady 等待期间被取消 → 不再发起登录，也不发', async () => {
+  const ready = deferred<boolean>()
+  const h = harness({ webChatReady: () => ready.promise })
+  const pending = runSend(h.deps)
+
+  await tick()
+  assert.equal(h.gate.isBusy(), true)
+  assert.equal(h.gate.abortCurrent(), true, '停止键要能中止这一轮')
+  ready.resolve(false)
+
+  const outcome = await pending
+  assert.equal(outcome.cancelled, true)
+  assert.equal(h.loginCalls, 0, '取消之后不许再弹登录窗')
+  assertNoSendHappened(h.effects)
+  assert.deepEqual(h.notices, [], '取消不是失败，不许弹错误提示')
+  assert.equal(h.gate.isBusy(), false)
+})
+
+test('三审 P1：loginWebChat 等待期间被取消 → 登录成功后也不许继续发', async () => {
+  const login = deferred<{ ok: boolean }>()
+  const h = harness({
+    webChatReady: async () => false,
+    loginWebChat: () => {
+      h.loginCalls += 1
+      return login.promise
+    },
+  })
+  const pending = runSend(h.deps)
+
+  await tick()
+  assert.equal(h.gate.isBusy(), true)
+  assert.equal(h.loginCalls, 1, '登录已经发出去了（原生那边不一定能中断，这是允许的）')
+  assert.equal(h.gate.abortCurrent(), true, '用户点了停止')
+
+  // 登录这时才成功返回
+  login.resolve({ ok: true })
+  const outcome = await pending
+
+  assert.equal(outcome.cancelled, true)
+  assert.equal(outcome.accepted, false)
+  assertNoSendHappened(h.effects)
+  assert.deepEqual(h.notices, [], '取消不是登录失败，不许弹「网页账号还没登录」这类误导提示')
+  assert.equal(h.gate.isBusy(), false, '这一轮必须释放')
+})
+
+test('三审 P1：本地指令执行期间被取消 → 不进入 commit', async () => {
+  const h = harness({
+    runLocalCommand: async () => false,
+    hasApiKey: false,
+    runOfflineReply: async () => true,
+  })
+  const pending = runSend(h.deps)
+  h.gate.abortCurrent()
+  const outcome = await pending
+  // 离线回复自己会看 signal；这里只确认不会进 commit
+  assert.equal(h.effects.startedGeneration, 0)
+  assert.equal(outcome.started, true)
+})
+
+/* ------------------------------------------------------------------ */
+/* 失败路径                                                            */
+/* ------------------------------------------------------------------ */
+
+test('登录返回 ok:false：提示原因、正常释放、不发送', async () => {
+  const h = harness({
+    webChatReady: async () => false,
+    loginWebChat: async () => ({ ok: false, message: '登录窗口被关掉了' }),
+  })
+  const outcome = await runSend(h.deps)
+
+  assert.equal(outcome.accepted, false)
+  assert.equal(outcome.cancelled, false)
+  assert.deepEqual(h.notices, ['登录窗口被关掉了'])
+  assertNoSendHappened(h.effects)
+  assert.equal(h.gate.isBusy(), false)
+})
+
+test('登录 reject：异常照原样抛出（不被吞），但这一轮仍然释放', async () => {
+  const boom = new Error('IPC 断了')
+  const h = harness({
+    webChatReady: async () => false,
+    loginWebChat: async () => {
+      throw boom
+    },
+  })
+
+  await assert.rejects(runSend(h.deps), (error: unknown) => error === boom)
+  assertNoSendHappened(h.effects)
+  assert.equal(h.gate.isBusy(), false, '异常路径也必须释放，否则发送键永久卡死')
+  assert.equal(h.gate.current(), null)
+  assert.equal(h.settleCalls, 1)
+})
+
+/* ------------------------------------------------------------------ */
+/* 取消之后立刻再发 / 归属判断                                          */
+/* ------------------------------------------------------------------ */
+
+test('三审 P1：取消之后立刻再发，旧轮收尾不影响新轮', async () => {
+  const login = deferred<{ ok: boolean }>()
+  const first = harness({
     webChatReady: async () => false,
     loginWebChat: () => login.promise,
   })
-
-  // 登录还挂着：这一轮应当占着 busy，并且能被「停止」拿到 signal
-  await new Promise<void>((resolve) => setTimeout(resolve, 5))
-  assert.equal(gate.isBusy(), true)
-  assert.equal(gate.abortCurrent(), true, '停止键要能中止登录中的这一轮')
-
-  // 登录这时才返回；因为已经 abort，调用方会拿到结果并走 finally
+  const pending = runSend(first.deps)
+  await tick()
+  first.gate.abortCurrent()
   login.resolve({ ok: true })
-  const result = await pending
-  assert.equal(result.started, true)
-  assert.equal(gate.isBusy(), false, '取消之后也必须释放')
+  await pending
+  assert.equal(first.gate.isBusy(), false)
 
-  // 新一轮可以立刻开始，而且旧轮的 finally 不会把它清掉
-  const second = gate.begin()
-  assert.ok(second !== null)
-  assert.equal(gate.current(), second?.abort)
+  // 同一把 gate 上开第二轮（模拟同一个 engine 模块）
+  const secondTurn = first.gate.begin()
+  assert.ok(secondTurn !== null, '取消之后必须能立刻再发')
+
+  // 旧轮的收尾（engine 的 endTurn）晚到：不许清新轮
+  first.deps.end(first.turns[0]!)
+  assert.equal(first.gate.isBusy(), true, '旧轮 finally 不能把新轮状态清掉')
+  assert.equal(first.gate.current(), secondTurn?.abort)
+
+  assert.equal(first.gate.end(secondTurn!), true)
+  assert.equal(first.gate.isBusy(), false)
+})
+
+test('已经有一轮在跑时不会再开一轮', async () => {
+  const h = harness()
+  const held = h.gate.begin()
+  assert.ok(held !== null)
+  const outcome = await runSend(h.deps)
+  assert.deepEqual(outcome, { started: false, accepted: false, cancelled: false })
+  assertNoSendHappened(h.effects)
 })
 
 /* ------------------------------------------------------------------ */
-/* 6. 登录异常后立即再发：第二轮可以正常启动                             */
+/* 接线：engine 真的用的是这个函数                                       */
 /* ------------------------------------------------------------------ */
 
-test('P1：登录异常之后立刻再发，第二轮能正常占位并跑完', async () => {
-  const gate = createTurnGate()
-
-  await assert.rejects(
-    attemptSend(gate, {
-      webChatReady: async () => false,
-      loginWebChat: async () => {
-        throw new Error('第一次炸了')
-      },
-    }),
-  )
-
-  const second = await attemptSend(gate, {
-    webChatReady: async () => false,
-    loginWebChat: async () => ({ ok: true }),
-  })
-
-  assert.deepEqual(second, { started: true, outcome: 'ready', justLoggedIn: true })
-  assert.equal(gate.isBusy(), false)
-})
-
-/* ------------------------------------------------------------------ */
-/* 7. 归属判断：旧轮晚到的 finally 不许动新轮                            */
-/* ------------------------------------------------------------------ */
-
-test('P1：旧轮 finally 晚到时不清理新轮的 controller', () => {
-  const gate = createTurnGate()
-  const first = gate.begin()
-  assert.ok(first !== null)
-
-  // 模拟「上一轮被兜底复位之后，新一轮已经起来了」
-  gate.reset()
-  const second = gate.begin()
-  assert.ok(second !== null)
-  assert.notEqual(second?.abort, first?.abort)
-
-  // 旧轮现在才收尾
-  const released = gate.end(first!)
-  assert.equal(released, false, '旧轮不该被当成当前轮')
-  assert.equal(gate.isBusy(), true, '新一轮还在跑，busy 不能被旧轮清掉')
-  assert.equal(gate.current(), second?.abort)
-
-  // 新轮自己收尾才生效
-  assert.equal(gate.end(second!), true)
-  assert.equal(gate.isBusy(), false)
-})
-
-/* ------------------------------------------------------------------ */
-/* 8. 接线：sendMessage 里只有一个释放点                                */
-/* ------------------------------------------------------------------ */
-
-test('P1：sendMessage 的准备阶段在主 try 内，且只有一个 endTurn（在 finally 里）', () => {
+test('接线：sendMessage 调用 runSend，commit 指向真正落库的那个函数', () => {
   const engine = stripComments(read('src/lib/engine.ts'))
   const start = engine.indexOf('export async function sendMessage')
   const end = engine.indexOf('export async function sendGroupMessage', start)
   const body = engine.slice(start, end === -1 ? undefined : end)
 
-  const tryAt = body.indexOf('try {')
-  const loginAt = body.indexOf('ensureWebChatLogin(')
-  const finallyAt = body.indexOf('} finally {')
-  const endTurnAt = body.indexOf('endTurn(turn)')
+  assert.match(body, /await runSend\(\{/, 'sendMessage 必须走 runSend')
+  assert.match(body, /begin: beginTurn,/, '占位用 beginTurn')
+  assert.match(body, /end: endTurn,/, '释放用 endTurn（带归属判断）')
+  assert.match(body, /commit: \(turn\) => runSendCommit\(\{/, 'commit 指向真正落库的那个函数')
+  assert.equal((body.match(/endTurn\(turn\)/g) ?? []).length, 0, 'engine 里不许再有零散的 endTurn')
+  assert.equal((body.match(/beginTurn\(\)/g) ?? []).length, 0, '占位只由 runSend 负责')
 
-  assert.ok(tryAt > 0 && loginAt > 0 && finallyAt > tryAt && endTurnAt > 0, '锚点都要能找到')
-  assert.ok(tryAt < loginAt, '网页登录必须在主 try 里面 —— 否则 reject 时没人释放')
-  assert.ok(finallyAt < endTurnAt, 'endTurn 必须在 finally 里')
-  assert.equal(
-    (body.match(/endTurn\(turn\)/g) ?? []).length,
-    1,
-    '准备阶段不许再有零散的 endTurn 补丁，释放只留 finally 一处',
-  )
-  assert.equal(
-    (body.match(/beginTurn\(\)/g) ?? []).length,
-    1,
-    '一轮只占一次位',
-  )
+  // 那四条副作用确实在 runSendCommit 里
+  const commitStart = engine.indexOf('async function runSendCommit')
+  const commitBody = engine.slice(commitStart, engine.indexOf('export async function sendGroupMessage', commitStart))
+  assert.match(commitBody, /actions\.createConversation\(\)/, '建会话在 commit 里')
+  assert.match(commitBody, /actions\.appendMessage\(userMessage\)/, '写用户消息在 commit 里')
+  assert.match(commitBody, /options\.onAccepted\?\.\(\)/, 'onAccepted 在 commit 里')
+  assert.match(commitBody, /runAssistantTurn\(/, '起模型请求在 commit 里')
 })

@@ -33,7 +33,7 @@ import { currentProvider, isWebChatProvider } from './providers'
 import { webChatReady, loginWebChat, setWebChatContext } from './web-chat'
 import { buildWebChatContext } from './web-context'
 import { createTurnGate, type Turn } from './turn-gate'
-import { ensureWebChatLogin } from './web-login-step'
+import { runSend } from './send-orchestrator'
 
 /**
  * 一次发言允许的工具循环轮数。
@@ -266,76 +266,69 @@ export async function sendMessage(
     useAppStore.getState().actions.showToast(`一次最多附上 ${MAX_ATTACHMENTS} 个文件`)
     return false
   }
-  /*
-   * 先把「正在发送」占住，再去做下面那些 await。
-   *
-   * 以前 busy 的检查和置位之间隔着 runLocalCommand / webChatReady / loginWebChat
-   * 三个真实 await：连点两下发送能开出两轮，两轮各自 new AbortController 互相覆盖
-   * activeAbort，先启动的那轮就再也停不下来了（BUG-REVIEW T-08）。
-   */
-  const turn = beginTurn()
-  if (turn === null) return false
-  const signal = turn.abort.signal
   const store = useAppStore.getState()
   const settings = store.settings
 
   /*
-   * 一轮发送的全部工作 —— 准备阶段（本地指令 / 离线回复 / 网页账号登录）和生成阶段 ——
-   * 都放在这一个 try 里，释放只由末尾那一个 finally 负责。
+   * 整条链路（占位 → 准备 → 取消闸门 → 提交 → 统一释放）都在 runSend 里。
    *
-   * 以前准备阶段是一堆零散的 endTurn 补丁：本地指令一个 try/catch、离线回复一个
-   * try/finally、webChatReady 一个 try/catch……而 `await loginWebChat()` 那一步谁都没管。
-   * 它内部是 native.webApiLogin / webChatShow / webApiCapture 三个真实异步，任何一个
-   * reject，endTurn 就轮不到执行 —— busy 永远停在 true，发送键卡成「停止」，
-   * 只能重启进程（二审 P1）。
+   * 抽出去的原因很具体：engine 依赖 IndexedDB 与 Capacitor，node 里跑不起来，
+   * 所以「登录期间点了停止，回来还会不会继续发」这种问题，只有把业务编排放在
+   * 一个可注入依赖的函数里才测得动 —— 否则测试只能在测试文件里自己抄一遍流程，
+   * 那证明的是测试代码，不是生产代码（三审意见）。
    *
-   * 现在不分类讨论：只要 beginTurn() 成功，这个 finally 就一定会跑到。
-   * 逐轮归属判断仍留在 endTurn 里（旧轮晚到的 finally 不会清掉新轮的 controller）。
-   *
-   * 失败照旧往上报：catch 里 `stream === null` 那条分支就是「还没开始生成就失败」，
-   * 只提示原因、不伪造助手消息，输入框保留原文，用户可以直接重试。
-   *
-   * accepted 记「用户消息是否已落库」，失败时决定输入框要不要清空；
-   * stream 非空表示已经进入生成阶段（失败才需要落一条助手消息）。
+   * 取消判断（signal.aborted）也在 runSend 里：webChatReady / loginWebChat 每个
+   * await 之后、以及进入 commit 之前都会复查，取消之后不会再建会话、不会落库、
+   * 不会触发 onAccepted、也不会起模型请求。
    */
+  const outcome = await runSend({
+    begin: beginTurn,
+    end: endTurn,
+    notify: (message) => useAppStore.getState().actions.showToast(message),
+    runLocalCommand: (signal) => runLocalCommand(trimmed, attachments, signal),
+    runOfflineReply: (signal) => runOfflineReply(trimmed, attachments, signal),
+    hasApiKey: hasApiKey(settings),
+    isWebChatProvider: isWebChatProvider(settings),
+    webChatReady,
+    loginWebChat,
+    commit: (turn) => runSendCommit({
+      store,
+      settings,
+      trimmed,
+      attachments,
+      options,
+      signal: turn.abort.signal,
+    }),
+    settle: () => {
+      useAppStore.getState().actions.setSending(false)
+      useAppStore.getState().actions.endLive()
+    },
+  })
+  return outcome.accepted
+}
+
+/**
+ * 一轮发送的「提交」阶段：建会话 → 写用户消息 → onAccepted → 起模型请求。
+ *
+ * 只有 runSend 通过了取消闸门才会调到这里 —— 这也是为什么取消之后不会出现
+ * 「消息还是发出去了」：这四条副作用全在这个函数里。
+ */
+async function runSendCommit(input: {
+  store: ReturnType<typeof useAppStore.getState>
+  settings: Settings
+  trimmed: string
+  attachments: Attachment[]
+  options: { onAccepted?: () => void }
+  signal: AbortSignal
+}): Promise<boolean> {
+  const { store, settings, trimmed, attachments, options, signal } = input
+
+  store.actions.setNotice('')
+  stageBridge.current?.pulse('send')
+
   let accepted = false
   let stream: { conversationId: string; history: ChatMessage[] } | null = null
   try {
-    // ---- 准备阶段 ----
-
-    // 「转个圈」「吐泡泡」这类是给虎鲸的动作口令，本地做完就结束。
-    if (await runLocalCommand(trimmed, attachments, signal)) return true
-
-    // 没接 Key 不等于「什么都不能做」：虎鲸仍然在，只是暂时说不了长话。
-    // 所以这里绝不把用户强行弹到设置页——那会打断每一次普通对话。
-    // 只把消息照常存下来，回一句本地短话，并在输入框上方留一个可点的提示。
-    if (hasApiKey(settings) === false) {
-      return await runOfflineReply(trimmed, attachments, signal)
-    }
-
-    // 网页账号模式：附件要走网页账号的上传接口（纯 HTTP 模式支持；网页窗遥控模式会提示）。
-    // 这里不再一刀切拒绝，交给 deepseek.ts 的网页链路处理。
-    //
-    // 前置条件：有可用的登录态（HTTP 模式），或者网页窗开着（DOM 遥控后备）。
-    // 两者都没有才需要用户去登录——而且登录一次就行，之后窗口关不关都不影响聊天。
-    if (isWebChatProvider(settings)) {
-      /*
-       * 这一步会走 native.webApiLogin / webChatShow / webApiCapture 三个真实异步，
-       * 任何一个 reject 都会抛出去 —— 由本函数统一的 try/finally 负责释放这一轮，
-       * catch 里 `stream === null` 那条分支负责提示原因（二审 P1）。
-       */
-      const outcome = await ensureWebChatLogin({ webChatReady, loginWebChat })
-      if (outcome.kind === 'blocked') {
-        useAppStore.getState().actions.showToast(outcome.message)
-        return false
-      }
-      if (outcome.justLoggedIn) useAppStore.getState().actions.showToast('网页账号已连接；以后不用再登录了')
-    }
-
-    store.actions.setNotice('')
-    stageBridge.current?.pulse('send')
-
-    // ---- 生成阶段 ----
     let conversationId = store.activeId
     if (conversationId === null) {
       conversationId = await store.actions.createConversation()
@@ -419,11 +412,6 @@ export async function sendMessage(
         bodyMind.note('error', '你和用户的连接刚刚断了一下')
       }
     }
-  } finally {
-    // 只复位「自己这一轮」的状态：旧轮晚到的收尾不能把新轮的 controller 清成 null（T-08）。
-    endTurn(turn)
-    useAppStore.getState().actions.setSending(false)
-    useAppStore.getState().actions.endLive()
   }
 
   return accepted

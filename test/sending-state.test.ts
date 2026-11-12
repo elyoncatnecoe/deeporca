@@ -44,16 +44,28 @@ const webChat = read('src/lib/web-chat.ts')
 const mcp = read('src/lib/mcp.ts')
 const store = read('src/lib/store.ts')
 
-test('P0-2 / T-08：五个入口都是「先 beginTurn 占位、再做 await」', () => {
+test('P0-2 / T-08：五个入口都是「先占位、再做 await」', () => {
   const code = stripComments(engine)
-  const entries = [
-    'export async function sendMessage',
+
+  // sendMessage 的编排搬进了 runSend：这里验证它把占位/释放交了出去，
+  // 真正「先占位再 await」的顺序由下面那段对 runSend 的断言守着。
+  const sendStart = code.indexOf('export async function sendMessage')
+  const sendBody = code.slice(sendStart, code.indexOf('export async function sendGroupMessage', sendStart))
+  assert.match(sendBody, /begin: beginTurn,/, 'sendMessage 把占位交给 runSend')
+  assert.match(sendBody, /end: endTurn,/, '释放也交给 runSend（里面带归属判断）')
+
+  const orchestrator = stripComments(read('src/lib/send-orchestrator.ts'))
+  const beginAt = orchestrator.indexOf('const turn = deps.begin()')
+  const firstAwait = orchestrator.indexOf('await ')
+  assert.ok(beginAt > 0 && firstAwait > beginAt, 'runSend 必须先占位再 await，否则双击能开出两轮')
+  assert.match(orchestrator, /if \(turn === null\) return \{ started: false/, '占位失败要直接退出')
+
+  for (const name of [
     'export async function sendGroupMessage',
     'export async function continueTurn',
     'export async function regenerateAtMessage',
     'export async function editAndResend',
-  ]
-  for (const name of entries) {
+  ]) {
     const start = code.indexOf(name)
     assert.ok(start > 0, `找不到 ${name}`)
     const body = code.slice(start, start + 2600)
@@ -68,10 +80,11 @@ test('P0-2 / T-08：五个入口都是「先 beginTurn 占位、再做 await」'
 
 test('P0-2 / T-08：beginTurn 与 endTurn 成对出现，busy / activeAbort 只在 turnGate 里改', () => {
   const code = stripComments(engine)
-  const begins = (code.match(/= beginTurn\(\)/g) ?? []).length
-  const ends = (code.match(/endTurn\(turn\)/g) ?? []).length
+  // 四个入口直接调 beginTurn()/endTurn()，sendMessage 则把它们交给 runSend。
+  const begins = (code.match(/(?:= beginTurn\(\)|begin: beginTurn,)/g) ?? []).length
+  const ends = (code.match(/(?:endTurn\(turn\)|end: endTurn,)/g) ?? []).length
   assert.ok(begins >= 5, `五个入口都要占位，实际只有 ${begins} 处`)
-  // 早退分支不再各自补 endTurn（准备阶段已并入主 try），所以两边应当一样多。
+  // 早退分支不再各自补 endTurn（准备阶段已并入 runSend 的主 try），所以两边应当一样多。
   assert.equal(ends, begins, `endTurn（${ends}）必须和 beginTurn（${begins}）一样多`)
   /*
    * 核心不变量：engine 里不许再直接碰 busy / activeAbort。

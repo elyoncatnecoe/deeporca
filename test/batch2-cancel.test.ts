@@ -137,26 +137,29 @@ test('T-09：本地指令与离线回复接收 signal，并在写回复前判断
   }
 })
 
-test('T-09：sendMessage 的准备阶段在主 try 里，异常由统一 finally 释放', () => {
-  const start = engineCode.indexOf('export async function sendMessage')
-  const end = engineCode.indexOf('export async function sendGroupMessage', start)
-  const body = engineCode.slice(start, end === -1 ? undefined : end)
-  const tryAt = body.indexOf('try {')
-  const finallyAt = body.indexOf('} finally {')
-  assert.ok(tryAt > 0 && finallyAt > tryAt, '主 try/finally 要能找到')
+test('T-09：准备阶段（本地指令 / 离线 / 网页登录）都在 runSend 里，释放只留一处', () => {
+  const orchestrator = stripComments(read('src/lib/send-orchestrator.ts'))
   /*
-   * 准备阶段（本地指令 / 离线回复 / 网页账号登录）自己不管 busy，全部放在主 try 里；
-   * 任何一步抛错都由同一个 finally 释放 —— 这是二审 P1 的修法：不再按分支补 endTurn，
-   * 否则总有一条路会漏（上次漏的就是 `await loginWebChat()`）。
+   * 第三轮把「占位 → 准备 → 取消闸门 → 提交」搬进了 send-orchestrator.ts，
+   * 生产代码（engine.sendMessage）与测试调的是同一个 runSend。
+   * 这里守的是：三条准备路径都在同一个 try 里，释放只由 finally 负责。
    */
-  const prepare = body.slice(tryAt, finallyAt)
-  for (const anchor of ['runLocalCommand(', 'runOfflineReply(', 'ensureWebChatLogin(']) {
+  const tryAt = orchestrator.indexOf('try {')
+  const finallyAt = orchestrator.indexOf('} finally {')
+  assert.ok(tryAt > 0 && finallyAt > tryAt, '主 try/finally 要能找到')
+  const prepare = orchestrator.slice(tryAt, finallyAt)
+  for (const anchor of ['runLocalCommand(signal)', 'runOfflineReply(signal)', 'ensureWebChatLogin(']) {
     assert.ok(prepare.includes(anchor), `${anchor} 必须在主 try 里，否则它抛错时没人释放这一轮`)
   }
   assert.equal(
-    (body.match(/endTurn\(turn\)/g) ?? []).length,
+    (orchestrator.match(/deps\.end\(turn\)/g) ?? []).length,
     1,
-    '释放只留 finally 一处，准备阶段不许再有零散的 endTurn 补丁',
+    '释放只留 finally 一处，不许再有零散的 end 补丁',
+  )
+  assert.equal(
+    (orchestrator.match(/deps\.begin\(\)/g) ?? []).length,
+    1,
+    '一轮只占一次位',
   )
 })
 
