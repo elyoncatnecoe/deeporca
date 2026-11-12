@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { findAssistant } from '../lib/assistant'
 import { bodyMind, type BodySpeech } from '../lib/body'
 import { randomPoke } from '../lib/pokes'
 import { stageBridge } from '../lib/stage-bridge'
@@ -30,9 +29,14 @@ const GREETING_DWELL = 5500
 export function OrcaBubble() {
   const screen = useAppStore((state) => state.screen)
   const sending = useAppStore((state) => state.sending)
-  const settings = useAppStore((state) => state.settings)
-  // 气泡上署谁的名字：第一优先级助手（选中 → 退第一个），不再是单独的 orcaName。
-  const name = findAssistant(settings, undefined).name
+  /*
+   * 气泡上**不署助手名**，台词里也**不用助手名自称**。
+   *
+   * 这个气泡是 App 自己写的台词，看上去就是「虎鲸本人在说话」；而助手名是用户
+   * 随便改的（还能改成很长、很离谱的内容）。以前这里会拼出「夜里好。我是<自定义名>。」，
+   * 等于让 App 替用户把任意文字念出来 —— 有人就是这么整活的。
+   * 所以名字彻底从这条链路里拿掉；标题区/聊天气泡那些「一眼看得出是人改过的」地方不受影响。
+   */
   const actions = useAppStore((state) => state.actions)
   const layerRef = useRef<HTMLDivElement | null>(null)
   const [speech, setSpeech] = useState<BodySpeech | null>(() => bodyMind.getSpeech())
@@ -98,7 +102,8 @@ export function OrcaBubble() {
     const now = Date.now()
     if (speech !== null && now < speech.until) {
       return {
-        label: speech.kind === 'thought' ? '心里想' : speech.kind === 'pet' ? '被摸了' : name,
+        // 「心里想」「被摸了」是固定状态词，不是名字；普通说话不挂标签。
+        label: speech.kind === 'thought' ? '心里想' : speech.kind === 'pet' ? '被摸了' : '',
         text: speech.text,
         tone: speech.kind,
         until: speech.until,
@@ -109,11 +114,12 @@ export function OrcaBubble() {
       return { label: '在听你说', text: '让我想一想…', tone: 'live', until: Infinity }
     }
     if (screen === 'home' && now - screenAt < GREETING_DWELL) {
-      return { label: name, text: `${greeting()}。我是${name}。`, tone: 'say', until: screenAt + GREETING_DWELL }
+      // 只打招呼，不自报家门 —— 名字是用户可控的，不能进这条台词。
+      return { label: '', text: `${greeting()}。`, tone: 'say', until: screenAt + GREETING_DWELL }
     }
     return null
     // `tick` re-evaluates an expired moment so the bubble can fade out.
-  }, [speech, sending, screen, screenAt, name, tick])
+  }, [speech, sending, screen, screenAt, tick])
 
   useEffect(() => {
     if (moment === null || !Number.isFinite(moment.until)) return
@@ -150,13 +156,16 @@ export function OrcaBubble() {
           className="orca-bubble"
           data-tone={shown.tone}
           onClick={poke}
-          aria-label={`${shown.label}：${shown.text}。点击互动`}
+          aria-label={shown.label === '' ? `${shown.text}点击互动` : `${shown.label}：${shown.text}点击互动`}
           aria-hidden={visible ? undefined : true}
         >
-          <span className="orca-bubble-top">
-            <span className="orca-bubble-dot" data-live={sending ? 'true' : 'false'} />
-            <span>{shown.label}</span>
-          </span>
+          {/* 标签为空就整行不渲染（普通说话、打招呼都不挂标签）。 */}
+          {shown.label !== '' && (
+            <span className="orca-bubble-top">
+              <span className="orca-bubble-dot" data-live={sending ? 'true' : 'false'} />
+              <span>{shown.label}</span>
+            </span>
+          )}
           <span className="orca-bubble-text">{shown.text}</span>
           <span className="orca-bubble-tail" aria-hidden="true" />
         </button>
