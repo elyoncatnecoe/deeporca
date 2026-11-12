@@ -162,7 +162,7 @@ test('P1-2：openConversation 有请求代数守卫', () => {
   assert.match(open, /seq !== openSeq/, '先发后到的结果要作废')
 })
 
-test('P1-3：重生成/编辑重发在动库之前就占住 busy', () => {
+test('P1-3 / T-08：重生成/编辑重发在动库之前就占住 busy，用的是本轮专属句柄', () => {
   const engine = read('src/lib/engine.ts')
   for (const [name, endMarker] of [
     ['export async function regenerateAtMessage', 'export async function editAndResend'],
@@ -171,10 +171,12 @@ test('P1-3：重生成/编辑重发在动库之前就占住 busy', () => {
     const start = engine.indexOf(name)
     const end = engine.indexOf(endMarker, start + 1)
     const body = engine.slice(start, end === -1 ? undefined : end)
-    const busyAt = body.indexOf('busy = true')
+    const claimAt = body.indexOf('beginTurn()')
     const firstAwait = body.indexOf('await ')
-    assert.ok(busyAt > 0, `${name} 里应该有 busy = true`)
-    assert.ok(busyAt < firstAwait, `${name} 必须先把 busy 占住再 await，否则双击会并发起两轮`)
+    assert.ok(claimAt > 0, `${name} 里应该用 beginTurn() 占位`)
+    assert.ok(claimAt < firstAwait, `${name} 必须先把 busy 占住再 await，否则双击会并发起两轮`)
+    assert.match(body, /if \(turn === null\) return false/, `${name} 没占到位就要直接退出`)
+    assert.match(body, /endTurn\(turn\)/, `${name} 的 finally 必须按归属复位，别把新轮的状态清掉`)
   }
 })
 

@@ -29,8 +29,7 @@ function read(relative: string): string {
  *
  * 按 /\r?\n/ 切行，不是 split('\n')：Windows 检出（core.autocrlf=true）拿到的是 CRLF，
  * 行尾的 \r 会让 `.*$` 匹配不上（\r 在 JS 正则里算行终止符，$ 又只认字符串末尾），
- * 于是整行注释原样留下 —— 注释里解释规矩的那句「…三个 await 留在 try 外面…」
- * 就会被当成真的 await，这条守卫在 CRLF 机器上必然误报。
+ * 于是整行注释原样留下 —— 注释里解释规矩的那些字眼就会被当成真的代码。
  */
 function stripComments(text: string): string {
   return text
@@ -45,31 +44,47 @@ const webChat = read('src/lib/web-chat.ts')
 const mcp = read('src/lib/mcp.ts')
 const store = read('src/lib/store.ts')
 
-test('P0-2：busy 一旦置位，到 try 之间不许有 await', () => {
-  const lines = engine.split('\n')
-  const starts: number[] = []
-  lines.forEach((line, index) => {
-    if (/^\s*busy = true\s*$/.test(line)) starts.push(index)
-  })
-  assert.ok(starts.length >= 3, `发送/重生成/编辑重发三处都该有 busy = true，实际 ${starts.length} 处`)
-
-  for (const start of starts) {
-    let tryLine = -1
-    for (let index = start + 1; index < lines.length; index += 1) {
-      if (/^\s*try \{\s*$/.test(lines[index] ?? '')) {
-        tryLine = index
-        break
-      }
-    }
-    assert.ok(tryLine > start, `第 ${start + 1} 行的 busy = true 之后必须紧跟 try {`)
-    // 注释里出现「await」是在解释这条规矩本身，先剥掉注释再判断。
-    const between = stripComments(lines.slice(start + 1, tryLine).join('\n'))
-    assert.equal(
-      /\bawait\b/.test(between),
-      false,
-      `第 ${start + 1} 行 busy = true 与 try 之间出现 await：异常会直接 reject，busy 永久泄漏\n${between}`,
-    )
+test('P0-2 / T-08：五个入口都是「先 beginTurn 占位、再做 await」', () => {
+  const code = stripComments(engine)
+  const entries = [
+    'export async function sendMessage',
+    'export async function sendGroupMessage',
+    'export async function continueTurn',
+    'export async function regenerateAtMessage',
+    'export async function editAndResend',
+  ]
+  for (const name of entries) {
+    const start = code.indexOf(name)
+    assert.ok(start > 0, `找不到 ${name}`)
+    const body = code.slice(start, start + 2600)
+    const claim = body.indexOf('beginTurn()')
+    const guard = body.indexOf('if (turn === null)')
+    const firstAwait = body.indexOf('await ')
+    assert.ok(claim > 0, `${name} 必须用 beginTurn() 占住「正在发送」`)
+    assert.ok(guard > claim, `${name} 占位失败（已有一轮在跑）时必须直接退出`)
+    assert.ok(firstAwait === -1 || claim < firstAwait, `${name} 必须先占住 busy 再 await，否则双击能开出两轮`)
   }
+})
+
+test('P0-2 / T-08：beginTurn 与 endTurn 成对出现，全局状态只在 endTurn 里复位', () => {
+  const code = stripComments(engine)
+  const begins = (code.match(/beginTurn\(\)/g) ?? []).length
+  const ends = (code.match(/endTurn\(turn\)/g) ?? []).length
+  assert.ok(begins >= 5, `五个入口都要占位，实际只有 ${begins} 处`)
+  // 早退分支也要 endTurn（占位之后登录失败 / 本地指令处理完都要放开），所以复位处不会少于占位处。
+  assert.ok(ends >= begins, `endTurn 只有 ${ends} 处，少于 beginTurn 的 ${begins} 处`)
+  /*
+   * 这一条是本轮修复的核心不变量：activeAbort / busy 只允许在 beginTurn 与 endTurn
+   * （以及兜底的 resetSendingState）里改。散在别处的 `busy = false` 就是「旧轮收尾
+   * 把新轮状态清掉」的来源 —— 那会让新的一轮永远停不下来。
+   */
+  const outside = code
+    .replace(/function beginTurn[\s\S]*?\n\}/, '')
+    .replace(/function endTurn[\s\S]*?\n\}/, '')
+    .replace(/function resetSendingState[\s\S]*?\n\}/, '')
+  assert.doesNotMatch(outside, /^\s*activeAbort = null\s*$/m, 'activeAbort 只许在 endTurn / resetSendingState 里清')
+  assert.doesNotMatch(outside, /^\s*busy = false\s*$/m, 'busy 只许在 endTurn / resetSendingState 里复位')
+  assert.doesNotMatch(outside, /^\s*busy = true\s*$/m, 'busy 只许在 beginTurn 里置位')
 })
 
 test('P0-2：每一处置位都要有对应的复位', () => {
