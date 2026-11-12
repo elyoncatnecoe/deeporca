@@ -169,6 +169,20 @@ test('runAssistantTurn 用的是同一套「网页账号优先」规则', () => 
   assert.match(body, /const webMode = isWebChatProvider\(settings\)/, '路由判断用同一份 settings')
 })
 
+test('网页登录失效会自愈：清 token → 重新采集 → 重发一次', () => {
+  const src = stripComments(read('src/lib/web-chat.ts'))
+
+  // 发送端是唯一能观察到「网页说登录态失效」的地方
+  assert.match(src, /if \(first\.status !== 'no-session'\) return first/, '先正常发，不是 no-session 就直接返回')
+  assert.match(src, /sessionInvalid = true/, '标记登录态失效')
+  assert.match(src, /await logoutWebChat\(\)/, '清掉本地旧 token，否则 hasSession 一直为真')
+  assert.match(src, /const login = await loginWebChat\(\)/, '重新采集一次登录态')
+  assert.match(src, /if \(!login\.ok\) return first/, '采集失败就把原始错误交回去，不无限重试')
+
+  // 标记要影响「就绪判断」，否则永远走不到重新登录
+  assert.match(src, /if \(sessionInvalid\) return false/, 'webChatReady 要因此返回 false')
+  assert.match(src, /if \(result\.ok\) sessionInvalid = false/, '登录成功要清标记')
+})
 test('聊天页选模型时会把助手的旧覆盖清掉，避免「切了又跳回去」', () => {
   const chat = stripComments(read('src/components/Chat.tsx'))
   const start = chat.indexOf('async function chooseModel')
