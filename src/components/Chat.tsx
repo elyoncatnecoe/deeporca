@@ -37,7 +37,7 @@ import { WEB_CHAT_MODEL_INFO, isWebChatModel, modelInfo } from '../lib/models'
 import { visionOf, type VisionVerdict } from '../lib/capability'
 import { useAppStore, branchInfo, type SheetSize } from '../lib/store'
 import { currentProvider, hasApiKey, providerModels } from '../lib/providers'
-import { conversationConfig, applyRegexes } from '../lib/assistant'
+import { conversationConfig, applyRegexes, findAssistant } from '../lib/assistant'
 import type { AssistantRegex } from '../lib/types'
 import {
   exportableMessages,
@@ -954,9 +954,21 @@ export function Chat() {
         return
       }
     }
-    void actions.setSettings({ model: id })
+    /*
+     * 助手可以单独覆盖模型（助手编辑里那项「跟随全局模型」）。一旦它被设成某个具体
+     * 模型，就会盖住这里选的值 —— 真机上的表现就是「切回网页账号又跳回助手的 API
+     * 模型」，然后一路报「还没有填 API Key」。手动选模型是明确意图，所以先把当前
+     * 助手的覆盖清掉，让它回到「跟随全局」。
+     *
+     * 三处都 await：以前是 void，紧接着发送时可能读到还没落盘的旧快照。
+     */
+    const before = useAppStore.getState()
+    const conversation = before.conversations.find((item) => item.id === before.activeId)
+    const assistant = findAssistant(before.settings, conversation?.assistantId ?? before.settings.assistantId)
+    if (assistant.model !== '') await actions.updateAssistant(assistant.id, { model: '' })
+    await actions.setSettings({ model: id })
     // 对话快照也要跟着改，否则引擎下一轮仍用快照里的旧模型（和思考强度同一个坑）。
-    void actions.patchConversationConfig({ model: id })
+    await actions.patchConversationConfig({ model: id })
     closeModel(true)
   }
 

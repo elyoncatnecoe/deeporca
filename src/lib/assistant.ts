@@ -70,6 +70,28 @@ export function conversationConfig(settings: Settings, conversation: Conversatio
   return resolveAssistantConfig(settings, findAssistant(settings, conversation?.assistantId))
 }
 
+/**
+ * 一段对话**实际生效**的设置：模型 / 温度 / 思考强度等按「对话快照 → 助手覆盖 → 全局」取值。
+ *
+ * 为什么需要它：发送链路里原来有两套判断 —— `sendMessage()` 拿**全局** settings 决定
+ * 「要不要走网页账号 / 有没有 Key」，而 `runAssistantTurn()` 用 cfg.model 发请求。
+ * 一旦助手或对话快照覆盖了模型，两边就会打架，真机上的表现是：
+ *   · 全局是网页账号、快照是 API 模型 → 进了网页登录流程，请求却按 API 发 → 「还没有填 API Key」/401；
+ *   · 全局是 API、快照是网页模型 → 直接走离线回复 → 「还没接上模型，点这里填 API Key」。
+ * 现在两处都用这一个函数算出来的设置，判断和请求永远同源。
+ */
+export function effectiveSettings(settings: Settings, conversation: Conversation | undefined): Settings {
+  const cfg = conversationConfig(settings, conversation)
+  return {
+    ...settings,
+    model: cfg.model,
+    temperature: cfg.temperature,
+    thinkingEffort: cfg.thinkingEffort,
+    recentChats: cfg.recentChats,
+    timeReminder: cfg.timeReminder,
+  }
+}
+
 /** 把 `{{ message }}` 套进助手的消息模板；没配模板就原样返回。 */
 export function applyMessageTemplate(template: string, text: string): string {
   const trimmed = (template ?? '').trim()
