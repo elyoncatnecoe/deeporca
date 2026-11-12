@@ -44,7 +44,8 @@ import {
   messageMarkdownFileName,
   messageToMarkdown,
 } from '../lib/export-markdown'
-import { shareMarkdown } from '../lib/platform'
+import { shareMarkdown, writeClipboardText } from '../lib/platform'
+import { createComposerClear } from '../lib/composer-clear'
 import { webChatAvailable } from '../lib/web-chat'
 import { ExportDialog } from './ExportDialog'
 import { SaveToWorkshopDialog, type SnippetDraft } from './SaveToWorkshop'
@@ -336,12 +337,16 @@ function Bubble(props: {
   }
 
   const copy = async (): Promise<void> => {
-    try {
-      await navigator.clipboard.writeText(message.content)
-      actions.showToast('已复制')
-    } catch {
-      actions.showToast('复制失败')
-    }
+    /*
+     * 必须走 platform.writeClipboardText，不能直接用 navigator.clipboard。
+     *
+     * 真机上「点复制失败」的根因就在这里：Android WebView 里
+     * navigator.clipboard.writeText 经常直接 reject（非安全上下文 / 没有剪贴板权限），
+     * 而 writeClipboardText 在安卓上会先走原生 ClipboardManager（DeepSeaClipboard 插件），
+     * 失败才落回网页实现。项目里其他复制入口（助手页、选中复制条）早就用的是它。
+     */
+    const ok = await writeClipboardText(message.content)
+    actions.showToast(ok ? '已复制' : '复制失败，可以长按选中再复制')
   }
 
   const startEdit = (): void => {
@@ -607,6 +612,17 @@ export function Chat() {
   const [input, setInput] = useState('')
   const [runner, setRunner] = useState<{ code: string; lang: string } | null>(null)
   const [attachments, setAttachments] = useState<Attachment[]>([])
+  /*
+   * 附件数的实时镜像。
+   *
+   * 清空输入框发生在异步回调里（engine 落库之后 / 整轮生成结束之后），
+   * 那时闭包里的 `attachments` 还是点击发送那一次渲染的值 —— 用它做「有没有变化」
+   * 的判断永远是「没变」，用户生成期间新加的附件就会被一起清掉。
+   */
+  const attachmentsRef = useRef<Attachment[]>([])
+  useEffect(() => {
+    attachmentsRef.current = attachments
+  }, [attachments])
   const [preparing, setPreparing] = useState(false)
   const [dragActive, setDragActive] = useState(false)
   const [thinkingOpen, setThinkingOpen] = useState(false)
@@ -1032,34 +1048,38 @@ export function Chat() {
      * `await runAssistantTurn()`（整轮回复生成完才返回），于是「正在回应」的
      * 整段时间里，输入框都还留着刚发出去的那句话（截图里那个「暂留」）。
      *
-     * 现在改成 engine 在 accepted 那一刻回调 onAccepted。清空前再确认「输入框里
-     * 还是刚才那段」，避免把用户趁生成时新打的字一起抹掉（不做乐观清空，
-     * 失败也不需要回滚）。
+     * 现在改成 engine 在 accepted 那一刻回调 onAccepted；「清不清、还能不能再清」
+     * 的决策收在 createComposerClear 里（src/lib/composer-clear.ts）：
+     *   - 主清空只要触发过，结尾的兜底就不再执行 —— 否则用户在生成期间重新敲出
+     *     同样的文本，兜底会把这份新输入删掉（审查意见 P1）；
+     *   - 兜底只服务本地指令 / 离线回复这类不走 onAccepted 的即时成功路径；
+     *   - 清空前要求文本与附件都还是发送时那份，不误删用户新加的东西。
      */
-    const clearComposerIfUnchanged = (): void => {
-      if (inputRef.current !== null && inputRef.current.value.trim() === text) {
+    const composer = createComposerClear({
+      sent: { text, attachments: attachments.length },
+      read: () => ({ text: inputRef.current?.value.trim() ?? '', attachments: attachmentsRef.current.length }),
+      clear: () => {
         setInput('')
         setAttachments([])
         // 自己发的消息一定要看到：把「贴底」打开，否则用户之前往上翻过的话，
         // 新消息会安静地落在下面看不见。
         stickToBottom.current = true
         requestAnimationFrame(resizeInput)
-      }
-    }
+      },
+    })
     try {
       // 群聊走 sendGroupMessage（一个接一个说）；单聊仍走 sendMessage。
       const active = useAppStore.getState().conversations.find((item) => item.id === useAppStore.getState().activeId)
       accepted = active?.kind === 'group'
-        ? await sendGroupMessage(text, attachments, { onAccepted: clearComposerIfUnchanged })
-        : await sendMessage(text, attachments, { onAccepted: clearComposerIfUnchanged })
+        ? await sendGroupMessage(text, attachments, { onAccepted: composer.onAccepted })
+        : await sendMessage(text, attachments, { onAccepted: composer.onAccepted })
     } catch (error) {
       // engine 内部已经用 finally 兜住了发送状态；这里只防「连兜底都抛了」的极端情况，
       // 至少要让用户知道这次没发出去，而不是看着输入框发呆。
       actions.showToast(error instanceof Error ? error.message : '没发出去，再试一次')
     }
-    // 兜底：本地指令 / 离线回复这类「即时成功」路径不走 onAccepted，
-    // 生成阶段很短，这里补一次；仍然只在输入框没被改过时才清。
-    if (accepted) clearComposerIfUnchanged()
+    // 兜底：只处理没有触发 onAccepted 的即时成功路径（本地指令 / 离线回复）。
+    composer.settle(accepted)
   }
 
   function cycleSheet(): void {

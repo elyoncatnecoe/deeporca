@@ -24,11 +24,11 @@ function read(relative: string): string {
   return fs.readFileSync(path.join(root, relative), 'utf8')
 }
 
-/** 去掉行注释与块注释，避免注释里的字眼被当成代码。 */
+/** 去掉行注释与块注释，避免注释里的字眼被当成代码。按 /\r?\n/ 切行以兼容 CRLF 检出。 */
 function stripComments(text: string): string {
   return text
     .replace(/\/\*[\s\S]*?\*\//g, '')
-    .split('\n')
+    .split(/\r?\n/)
     .map((line) => line.replace(/(^|[^:])\/\/.*$/, '$1'))
     .join('\n')
 }
@@ -156,11 +156,47 @@ test('④ Chat 不再在 await 之后无条件清空输入框', () => {
     /if \(accepted\) \{\s*setInput\(''\)/,
     '不能在 sendMessage 返回后才清空（那时整轮回复已经生成完了）',
   )
-  assert.match(code, /clearComposerIfUnchanged/, '应改由 onAccepted 触发清空')
-  assert.match(code, /onAccepted: clearComposerIfUnchanged/, '两条发送路径都要挂上回调')
+  assert.match(code, /createComposerClear\(/, '清空决策应收在 createComposerClear 里（见 src/lib/composer-clear.ts）')
+  assert.match(code, /onAccepted: composer\.onAccepted/, '两条发送路径都要挂上回调')
+  assert.match(code, /composer\.settle\(accepted\)/, '结尾只保留兜底入口，不再直接调清空')
 })
 
-test('④ 清空前确认输入框没被用户改过（不误删新输入）', () => {
-  const code = stripComments(chat)
-  assert.match(code, /inputRef\.current\.value\.trim\(\) === text/, '只有内容还是刚才那段时才清空')
+test('④ 清空判定要求「文本与附件都还是发送时那份」，且主清空触发后不再兜底', () => {
+  const lib = read('src/lib/composer-clear.ts')
+  assert.match(lib, /now\.text !== options\.sent\.text/, '文本变了就不清')
+  assert.match(lib, /now\.attachments !== options\.sent\.attachments/, '附件变了也不清（别误删用户新加的）')
+  assert.match(lib, /if \(fired\) return/, '主清空触发过之后，兜底不许再执行（审查意见 P1）')
+})
+
+/* ------------------------------------------------------------------ */
+/* 审查意见 P2：群聊 fallback 丢了 onAccepted                           */
+/* ------------------------------------------------------------------ */
+
+test('④ 群聊 fallback「没有成员」也要把 onAccepted 传下去', () => {
+  const code = stripComments(engine)
+  assert.match(
+    code,
+    /if \(members\.length === 0\) return sendMessage\(text, attachments, options\)/,
+    '这条路退回单聊时，用户消息同样要落库，因此必须带上 options，否则输入框不会清空',
+  )
+})
+
+test('④ 群聊 fallback「没人接话」也要把 onAccepted 传下去', () => {
+  const code = stripComments(engine)
+  assert.match(
+    code,
+    /if \(speakers\.length === 0\) return sendMessage\(text, attachments, options\)/,
+    '同上：这条 fallback 漏了 options 就等于回到「输入框暂留」的老毛病',
+  )
+})
+
+test('④ sendMessage 内部确实在落库之后触发 onAccepted（fallback 依赖这一点）', () => {
+  const body = engine.slice(
+    engine.indexOf('export async function sendMessage'),
+    engine.indexOf('export async function sendGroupMessage'),
+  )
+  const accepted = body.indexOf('accepted = true')
+  const notify = body.indexOf('options.onAccepted?.()')
+  assert.ok(accepted >= 0 && notify >= 0, '两个锚点都要能找到')
+  assert.ok(accepted < notify, 'onAccepted 必须在 accepted = true 之后')
 })

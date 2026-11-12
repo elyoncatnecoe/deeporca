@@ -406,11 +406,11 @@ export async function sendGroupMessage(
   const members = (conversation.members ?? [])
     .map((id) => settings.assistants.find((item) => item.id === id))
     .filter((item): item is Assistant => item !== undefined)
-  if (members.length === 0) return sendMessage(text, attachments)
+  if (members.length === 0) return sendMessage(text, attachments, options)
 
   const groupSettings = conversation.groupSettings ?? { gapMs: 1500, allowChatter: false, maxTurnsPerRound: 3 }
   const { speakers, named } = planGroupRound(members, trimmed, groupSettings)
-  if (speakers.length === 0) return sendMessage(text, attachments)
+  if (speakers.length === 0) return sendMessage(text, attachments, options)
 
   busy = true
   activeAbort = new AbortController()

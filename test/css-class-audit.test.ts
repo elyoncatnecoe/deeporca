@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { collectDefinedClasses, extractClassNameExpressions, scanClassNames } from './css-audit-lib.ts'
 
 /**
  * className ↔ CSS 守卫。
@@ -11,15 +12,18 @@ import { fileURLToPath } from 'node:url'
  *   ① 历史抽屉筛选器 `className="drawer-filter"` —— 无规则，裸 <select> 在 Android
  *      WebView 上弹系统窗口，整页白屏；
  *   ② 记忆页「覆盖导入」`className="danger-button"` —— 无规则，退回浏览器默认按钮，
- *      字号/字重/内边距和旁边的「添加导入」对不上，肉眼一看就不是一套。
+ *      字号/字重/内边距和旁边的「添加导入」对不上。
  *
  * 所以这里做一次全量对账：src 下所有 .tsx/.ts 里 className 用到的类名，
- * 必须在 src 下某个 .css 的**选择器**里出现过。缺一条就失败，报错里直接给文件名 + 行号。
+ * 必须在 src 下某个 .css 的**选择器**里出现过。
  *
- * 已知的、故意不写样式的「纯钩子」类放进 ALLOWED_WITHOUT_STYLE，每条都要写原因；
- * 白名单里的类如果已经没人用了，同样失败（免得它一直挂着）。
+ * 覆盖范围（审查意见 P2 第 1、2 条）：
+ *   - 静态类名：直接查；
+ *   - 模板串的前缀 / 后缀：`tier-${level}` 查前缀，`tier-${level}-active` 连后缀一起查；
+ *   - 判断不了的动态片段：**不静默跳过**，收集起来在失败信息里给出文件、行号和原文。
  *
- * 这是静态检查，不是渲染测试。
+ * 解析细节（注释 / 字符串 / 行号）在 test/css-audit-lib.ts，另有 test/css-audit-lib.test.ts
+ * 用具体输入逐条验证。
  */
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -58,7 +62,7 @@ const ALLOWED_WITHOUT_STYLE: Record<string, string> = {
 const EXTRA_CSS_SOURCES = ['src/orca/ui/styles.ts']
 
 /* ------------------------------------------------------------------ */
-/* 工具                                                                */
+/* 收集                                                                */
 /* ------------------------------------------------------------------ */
 
 function walk(dir: string, extensions: string[], out: string[] = []): string[] {
@@ -73,117 +77,33 @@ function walk(dir: string, extensions: string[], out: string[] = []): string[] {
   return out
 }
 
-/** 把 src 下所有 .css 的**选择器**里的类名收集起来（声明块里的内容不算）。 */
-function collectDefinedClasses(cssFiles: string[]): Set<string> {
-  const defined = new Set<string>()
-  for (const file of cssFiles) {
-    const text = fs.readFileSync(file, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '')
-    // 每个 '{' 之前的那段文本就是选择器（@media/@supports 之类的 at-rule 里没有点，天然跳过）。
-    const ruleRe = /([^{}]*)\{/g
-    let match: RegExpExecArray | null
-    while ((match = ruleRe.exec(text)) !== null) {
-      const selector = match[1]
-      const classRe = /\.(-?[A-Za-z_][A-Za-z0-9_-]*)/g
-      let cls: RegExpExecArray | null
-      while ((cls = classRe.exec(selector)) !== null) defined.add(cls[1])
-    }
-  }
-  return defined
+interface Usage {
+  token: string
+  file: string
+  line: number
+  kind: 'static' | 'prefix' | 'suffix'
 }
-
-/** 取出源码里每个 className= 后面的表达式（字符串字面量 / {…} 表达式，括号配平）。 */
-function classNameExpressions(code: string): string[] {
-  const found: string[] = []
-  const re = /className\s*=\s*/g
-  let match: RegExpExecArray | null
-  while ((match = re.exec(code)) !== null) {
-    let i = match.index + match[0].length
-    const head = code[i]
-    if (head === '"' || head === "'") {
-      const end = code.indexOf(head, i + 1)
-      if (end === -1) break
-      found.push(code.slice(i, end + 1))
-      re.lastIndex = end + 1
-      continue
-    }
-    if (head !== '{') continue
-    let depth = 0
-    let j = i
-    for (; j < code.length; j++) {
-      const ch = code[j]
-      if (ch === '{') {
-        depth++
-      } else if (ch === '}') {
-        depth--
-        if (depth === 0) break
-      } else if (ch === '"' || ch === "'" || ch === '`') {
-        const quote = ch
-        j++
-        while (j < code.length && code[j] !== quote) {
-          if (code[j] === '\\') j++
-          j++
-        }
-      }
-    }
-    found.push(code.slice(i, j + 1))
-    re.lastIndex = j + 1
-  }
-  return found
-}
-
-const LITERAL_RE = /'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`/g
-
-/** 从一个 className 表达式里拆出所有类名 token。 */
-function classTokens(expression: string): string[] {
-  // className={mode === 'group' && 'newchat-group'} 里的 'group' 是比较值，不是类名。
-  const withoutComparisons = expression.replace(
-    /(===|!==|==|!=)\s*(?:'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`)/g,
-    '$1',
-  )
-  const tokens: string[] = []
-  const literals = withoutComparisons.match(LITERAL_RE) ?? []
-  for (const raw of literals) {
-    const body = raw
-      .slice(1, -1)
-      // 模板插值里是表达式，不可能是类名
-      .replace(/\$\{[^{}]*\}/g, ' ')
-    for (const piece of body.split(/\s+/)) {
-      if (piece === '') continue
-      // 只认纯粹的类名：带 / . : # = 的是路径、URL 或别的东西
-      if (!/^-?[A-Za-z_][A-Za-z0-9_-]*$/.test(piece)) continue
-      tokens.push(piece)
-    }
-  }
-  return tokens
-}
-
-/** 扫一遍源码，返回 class → 出现位置列表。 */
-function collectUsedClasses(files: string[]): Map<string, string[]> {
-  const used = new Map<string, string[]>()
-  for (const file of files) {
-    const code = fs.readFileSync(file, 'utf8')
-    const relative = path.relative(root, file).replace(/\\/g, '/')
-    for (const expression of classNameExpressions(code)) {
-      const offset = code.indexOf(expression)
-      const line = code.slice(0, offset === -1 ? 0 : offset).split('\n').length
-      for (const token of classTokens(expression)) {
-        const where = used.get(token) ?? []
-        where.push(`${relative}:${line}`)
-        used.set(token, where)
-      }
-    }
-  }
-  return used
-}
-
-/* ------------------------------------------------------------------ */
-/* 数据                                                                */
-/* ------------------------------------------------------------------ */
 
 const cssFiles = [...walk(srcDir, ['.css']), ...EXTRA_CSS_SOURCES.map((file) => path.join(root, file))]
 const sourceFiles = walk(srcDir, ['.tsx', '.ts']).filter((file) => !file.endsWith('.d.ts'))
 const defined = collectDefinedClasses(cssFiles)
-const used = collectUsedClasses(sourceFiles)
+
+const usages: Usage[] = []
+const unresolved: Array<{ file: string; line: number; raw: string }> = []
+
+for (const file of sourceFiles) {
+  const code = fs.readFileSync(file, 'utf8')
+  const relative = path.relative(root, file).replace(/\\/g, '/')
+  for (const expression of extractClassNameExpressions(code)) {
+    const scan = scanClassNames(expression.raw)
+    for (const token of scan.static) usages.push({ token, file: relative, line: expression.line, kind: 'static' })
+    for (const token of scan.prefixes) usages.push({ token, file: relative, line: expression.line, kind: 'prefix' })
+    for (const token of scan.suffixes) usages.push({ token, file: relative, line: expression.line, kind: 'suffix' })
+    if (scan.unresolved) unresolved.push({ file: relative, line: expression.line, raw: expression.raw })
+  }
+}
+
+const usedTokens = new Set(usages.map((item) => item.token))
 
 /* ------------------------------------------------------------------ */
 /* 断言                                                                */
@@ -193,31 +113,59 @@ test('扫描到的东西不是空的（防止 walk 写错后这条守卫变成�
   assert.ok(cssFiles.length >= 5, `只找到 ${cssFiles.length} 个 CSS 文件，路径可能写错了`)
   assert.ok(sourceFiles.length >= 20, `只找到 ${sourceFiles.length} 个源码文件，路径可能写错了`)
   assert.ok(defined.size >= 100, `只解析出 ${defined.size} 个类名，选择器提取可能失效了`)
-  assert.ok(used.size >= 100, `只找到 ${used.size} 个被使用的类名，className 提取可能失效了`)
+  assert.ok(usedTokens.size >= 100, `只找到 ${usedTokens.size} 个被使用的类名，className 提取可能失效了`)
 })
 
-test('源码里用到的每个 className 都在 CSS 里有对应规则', () => {
+test('源码里用到的每个静态 className 都在 CSS 里有对应规则', () => {
   const missing: string[] = []
-  for (const [token, places] of used) {
-    if (defined.has(token)) continue
-    // `tier-${level}` 这种拼接出来的类名，只保留前缀；要求前缀下至少有一条真规则。
-    if (token.endsWith('-')) {
-      if ([...defined].some((name) => name.startsWith(token))) continue
-      missing.push(`  ${token}*  ←  ${[...new Set(places)].join(', ')}（动态前缀下没有任何规则）`)
-      continue
-    }
-    if (Object.hasOwn(ALLOWED_WITHOUT_STYLE, token)) continue
-    missing.push(`  ${token}  ←  ${[...new Set(places)].join(', ')}`)
+  for (const usage of usages) {
+    if (usage.kind !== 'static') continue
+    if (defined.has(usage.token)) continue
+    if (Object.hasOwn(ALLOWED_WITHOUT_STYLE, usage.token)) continue
+    missing.push(`  ${usage.token}  ←  ${usage.file}:${usage.line}`)
   }
   assert.deepEqual(
-    missing.sort(),
+    [...new Set(missing)].sort(),
     [],
     `以下类名写了但没有任何 CSS 规则（要么补样式，要么加进 ALLOWED_WITHOUT_STYLE 并写明原因）：\n${missing.join('\n')}`,
   )
 })
 
+test('模板串里的动态前缀 / 后缀也能对上具体规则', () => {
+  const names = [...defined]
+  const problems: string[] = []
+  for (const usage of usages) {
+    if (usage.kind === 'static') continue
+    const hit = usage.kind === 'prefix'
+      ? names.some((name) => name.startsWith(usage.token))
+      : names.some((name) => name.endsWith(usage.token))
+    if (!hit) {
+      const what = usage.kind === 'prefix' ? '前缀' : '后缀'
+      problems.push(`  ${usage.token}*  ←  ${usage.file}:${usage.line}（这个${what}下没有任何规则）`)
+    }
+  }
+  assert.deepEqual(
+    [...new Set(problems)].sort(),
+    [],
+    `模板串拼出来的类名找不到对应规则：\n${problems.join('\n')}`,
+  )
+})
+
+test('判断不了的动态表达式不会被静默跳过', () => {
+  /*
+   * 这一条是审查意见 P2 第 2 条：`${a}-${b}` 这种中间片段没法归约成前缀或后缀，
+   * 静态分析到此为止。它**不允许**被塞进白名单糊过去，也不允许安静地消失 ——
+   * 一旦出现，就必须带着文件、行号和原文报出来，由人来判断。
+   */
+  assert.deepEqual(
+    unresolved.map((item) => `${item.file}:${item.line}  ${item.raw.replace(/\s+/g, ' ').slice(0, 120)}`),
+    [],
+    '这些 className 静态分析判断不了，请人工确认它们拼出来的类名在 CSS 里存在',
+  )
+})
+
 test('白名单里没有已经失效的条目', () => {
-  const stale = Object.keys(ALLOWED_WITHOUT_STYLE).filter((token) => !used.has(token))
+  const stale = Object.keys(ALLOWED_WITHOUT_STYLE).filter((token) => !usedTokens.has(token))
   assert.deepEqual(stale, [], `白名单里这些类已经没人用了，删掉：${stale.join(', ')}`)
 })
 

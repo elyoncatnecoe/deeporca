@@ -6658,6 +6658,17 @@ body:has(.modal-backdrop) .selection-copy {
   background: #0a2632;
 }
 
+/*
+ * 拍糊了的照片（PhotoAlbum 在 photo.blurry 时挂上 .is-blurry）。
+ *
+ * 这个类以前没有任何规则 —— 等于「标记了但看不出来」，而且因为旧守卫把
+ * `${…}` 里的字符串整个丢掉，一直没被发现。补强守卫后才暴露出来，顺手补上。
+ * 只做「看得出来是糊的」，不改布局。
+ */
+.album-item.is-blurry img {
+  filter: blur(3px) saturate(0.85);
+}
+
 .album-item figcaption {
   display: flex;
   align-items: center;
