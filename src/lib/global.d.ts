@@ -48,7 +48,13 @@ export type HttpStreamEvent =
 export interface DeepSeaBridge {
   platform: 'electron'
   version: string
-  secureGet: () => Promise<string | null>
+  /**
+   * 读凭证。
+   *
+   * 必须同时带回状态：「读失败」和「没配置」在 `string | null` 上无法区分，
+   * 而猜错的代价是覆盖掉用户还能恢复的密文。
+   */
+  secureGet: () => Promise<{ value: string | null; status: 'available' | 'unavailable' | 'read-error' }>
   secureSet: (value: string) => Promise<void>
   secureRemove: () => Promise<void>
   openWebChat: (css: string, js: string) => Promise<void>

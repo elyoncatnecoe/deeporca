@@ -6,6 +6,17 @@ import { Share } from '@capacitor/share'
 import { StatusBar, Style } from '@capacitor/status-bar'
 import { GALLERY_ALBUM, base64ToBytes, splitDataUrl } from './photo-store'
 import type { DeepSeaBridge } from './global'
+import {
+  SecureStorageError,
+  androidSecureGet,
+  androidSecureRemove,
+  androidSecureSet,
+  type AndroidSecureDeps,
+} from './android-secure'
+import type { SecureStorageStatus } from './secure-types'
+
+/** 供 store 等上层捕获；真正的定义在 android-secure.ts。 */
+export { SecureStorageError } from './android-secure'
 
 interface SecureStorePlugin {
   get: () => Promise<{ value: string | null }>
@@ -46,47 +57,79 @@ export const isWeb = !isAndroid && !isElectron
 
 const bridge = (): DeepSeaBridge | undefined => (typeof window === 'undefined' ? undefined : window.deepsea)
 
-export async function secureGet(): Promise<string | null> {
+/**
+ * 旧版降级路径写过的明文槽位。
+ *
+ * 历史实现里 Keystore 调用失败会 `localStorage.setItem('deepsea.apiKey', value)`，
+ * 于是老用户的 Key 可能还明文躺在这里。现在**只读一次做迁移**，不再往里写。
+ */
+const LEGACY_KEY = 'deepsea.apiKey'
+
+/** 把真实运行时依赖注入给纯逻辑层（判断规则都在 android-secure.ts，那边可单测）。 */
+function androidSecureDeps(): AndroidSecureDeps {
+  return {
+    pluginGet: async () => (await Secure.get()).value,
+    pluginSet: (value) => Secure.set({ value }),
+    pluginRemove: () => Secure.remove(),
+    legacyGet: () => localStorage.getItem(LEGACY_KEY),
+    legacyRemove: () => localStorage.removeItem(LEGACY_KEY),
+  }
+}
+
+export interface SecureReadResult {
+  value: string | null
+  status: SecureStorageStatus
+}
+
+/**
+ * 读凭证，**同时报告状态**。
+ *
+ * 只返回 `string | null` 的话，「读失败」和「没配置」在类型上无法区分，
+ * 上层只能猜 —— 而猜错的代价是把用户还能恢复的密文覆盖掉。
+ */
+export async function secureRead(): Promise<SecureReadResult> {
   const native = bridge()
-  if (native) return native.secureGet()
-  if (isAndroid) {
+  if (native) {
     try {
-      return (await Secure.get()).value
+      return await native.secureGet()
     } catch {
-      return localStorage.getItem('deepsea.apiKey')
+      // IPC 抛错（解密失败 / 主进程异常）：无法确认原凭证状态。
+      return { value: null, status: 'read-error' }
     }
   }
-  return localStorage.getItem('deepsea.apiKey')
+  if (isAndroid) return await androidSecureGet(androidSecureDeps())
+  // 纯浏览器预览：localStorage 就是它唯一的存储，没有系统密钥存储可用。
+  // 这是已记录的设计取舍（README 有说明），不是静默降级。
+  return { value: localStorage.getItem(LEGACY_KEY), status: 'available' }
 }
 
 export async function secureSet(value: string): Promise<void> {
   const native = bridge()
-  if (native) return native.secureSet(value)
-  if (isAndroid) {
+  if (native) {
     try {
-      await Secure.set({ value })
-      return
-    } catch {
-      localStorage.setItem('deepsea.apiKey', value)
-      return
+      return await native.secureSet(value)
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      throw new SecureStorageError(`系统安全存储不可用（${detail}），这次的 API Key 没有保存`)
     }
   }
-  localStorage.setItem('deepsea.apiKey', value)
+  if (isAndroid) return await androidSecureSet(androidSecureDeps(), value)
+  // 纯浏览器预览，同 secureRead 的说明。
+  localStorage.setItem(LEGACY_KEY, value)
 }
 
 export async function secureRemove(): Promise<void> {
   const native = bridge()
-  if (native) return native.secureRemove()
-  if (isAndroid) {
+  if (native) {
     try {
-      await Secure.remove()
-      return
-    } catch {
-      localStorage.removeItem('deepsea.apiKey')
-      return
+      return await native.secureRemove()
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      throw new SecureStorageError(`系统安全存储删除失败（${detail}），凭证可能仍留在设备上`)
     }
   }
-  localStorage.removeItem('deepsea.apiKey')
+  if (isAndroid) return await androidSecureRemove(androidSecureDeps())
+  localStorage.removeItem(LEGACY_KEY)
 }
 
 /**

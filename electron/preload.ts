@@ -32,7 +32,8 @@ type HttpBridge = {
 const api: DeepSeaBridge & HttpBridge = {
   platform: 'electron',
   version: ipcRenderer.sendSync('app:version') as string,
-  secureGet: () => ipcRenderer.invoke('secure:get') as Promise<string | null>,
+  secureGet: () =>
+    ipcRenderer.invoke('secure:get') as Promise<{ value: string | null; status: 'available' | 'unavailable' | 'read-error' }>,
   secureSet: (value: string) => ipcRenderer.invoke('secure:set', value) as Promise<void>,
   secureRemove: () => ipcRenderer.invoke('secure:remove') as Promise<void>,
   openWebChat: (css: string, js: string) => ipcRenderer.invoke('webchat:open', css, js) as Promise<void>,

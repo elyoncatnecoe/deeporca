@@ -18,7 +18,7 @@ import {
   clearConversations,
   clearMemories,
 } from './db'
-import { loadSettings, persistSettings } from './settings'
+import { loadSettings, persistSettings, getSecureStorageStatus, SECURE_READ_ERROR_MESSAGE, SECURE_UNAVAILABLE_MESSAGE } from './settings'
 import { findAssistant, resolveAssistantConfig } from './assistant'
 import { mirrorProviderFields, patchProvider, syncProviderToSettings } from './providers'
 import { reconcileServers, setPolicyWriter } from './mcp-registry'
@@ -32,6 +32,7 @@ import {
   renameWorkspaceFile as renameWorkspaceFileRecord,
 } from './workspace'
 import { stageBridge } from './stage-bridge'
+import { SecureStorageError } from './platform'
 import {
   DEFAULT_SETTINGS,
   DEFAULT_WORKSPACE,
@@ -270,6 +271,23 @@ export const useAppStore = create<AppState>((set, get) => ({
         screen: settings.onboardingDone ? 'home' : 'onboarding',
       })
 
+      /*
+       * 安全存储状态必须让用户真的看见。
+       *
+       * read-error 意味着「我们不知道盘上还有没有一份能恢复的密文」——这时候
+       * 用户如果以为 Key 丢了、重新输入一遍，就会把那份密文覆盖掉。所以这里同时
+       * 用常驻 notice（Chat 顶部的 role="status" 条）和 toast，确保不被忽略。
+       * 文案刻意不含「API Key」三个字，避免触发 Chat 里那个「去填 Key」的链接
+       * （那等于引导用户重新输入，正是本状态要禁止的）。
+       */
+      const secureStatus = getSecureStorageStatus()
+      if (secureStatus === 'read-error') {
+        set({ notice: SECURE_READ_ERROR_MESSAGE })
+        get().actions.showToast(SECURE_READ_ERROR_MESSAGE)
+      } else if (secureStatus === 'unavailable') {
+        get().actions.showToast(SECURE_UNAVAILABLE_MESSAGE)
+      }
+
       // 下面都是「有更好、没有也能用」的后置步骤，失败只记日志。
       try {
         // 恢复到上次所在界面（渲染进程被回收重载时尤其重要）。
@@ -355,8 +373,25 @@ export const useAppStore = create<AppState>((set, get) => ({
       } else if (patch.providers !== undefined) {
         next = mirrorProviderFields(next)
       }
+      const previous = get().settings
       set({ settings: next })
-      await persistSettings(next)
+      try {
+        await persistSettings(next)
+      } catch (error) {
+        /*
+         * 凭证没能写进系统安全存储（Keystore / DPAPI 不可用、删除失败）时，
+         * platform 层会抛 SecureStorageError 而不是退回明文。
+         *
+         * 必须把 settings 回滚到上一份：否则界面会显示「Key 已清空 / 已保存」，
+         * 而设备上其实还是旧状态 —— 这正是「UI 状态与存储状态不一致」。
+         */
+        if (error instanceof SecureStorageError) {
+          set({ settings: previous })
+          get().actions.showToast(error.message)
+          return
+        }
+        throw error
+      }
       if (patch.aquariumTheme !== undefined) stageBridge.current?.setTheme(next.aquariumTheme)
       // 助手设定 / 记忆相关变了，就把人设与记忆重新推给网页窗，
       // 否则网页账号那边还在用旧人设说话。

@@ -24,7 +24,10 @@ import {
 } from './types'
 import { migrateLegacyProvider, settleProviderOnBoot } from './providers'
 import { clampNumber, resolveProtocol } from './normalize'
-import { secureGet, secureRemove, secureSet } from './platform'
+import { getCredentialVault } from './secure-credentials'
+import type { SecureStorageStatus } from './secure-types'
+
+export { SECURE_READ_ERROR_MESSAGE, SECURE_UNAVAILABLE_MESSAGE } from './secure-types'
 
 /**
  * 内置助手头像的白名单 key。
@@ -40,8 +43,31 @@ let cachedKeys: Record<string, string> = {}
 /** 媒体 API 的 Key 使用保留槽位名，避免和 provider id 撞名。 */
 const MEDIA_IMAGE_KEY = 'media:image'
 const MEDIA_SPEECH_KEY = 'media:speech'
-/** 上次写入安全存储的原始 blob，用来判断要不要重写。 */
-let cachedKeyBlob = ''
+
+/**
+ * 安全存储的当前状态。
+ *
+ * 由 credential vault 维护，不在 settings 里另存一份 —— 两份状态迟早会不一致，
+ * 而不一致的那一次就会把用户凭证覆盖掉。
+ */
+export function getSecureStorageStatus(): SecureStorageStatus {
+  return getCredentialVault().getStatus()
+}
+
+/**
+ * 读凭证 blob。
+ *
+ * `loadSettings` 与单测都走这里：不碰 IndexedDB，所以能在 node 里直接跑状态机
+ * （node 没有 indexedDB，但凭证状态恰恰是最需要回归测试的部分）。
+ */
+export async function loadCredentialBlob(): Promise<string> {
+  return await getCredentialVault().load()
+}
+
+/** 写凭证 blob。`persistSettings` 与单测都走这里。 */
+export async function persistCredentialBlob(blob: string): Promise<'written' | 'removed' | 'skipped'> {
+  return await getCredentialVault().persist(blob)
+}
 
 const THEMES: readonly ThemeId[] = ['deep', 'iceberg', 'tropical']
 const QUALITIES: readonly QualityId[] = ['auto', 'low', 'medium', 'high']
@@ -477,7 +503,10 @@ export function sanitize(raw: Partial<Settings>): Settings {
 export async function loadSettings(): Promise<Settings> {
   const raw = await getAllSettings()
   const stored = (raw.app ?? {}) as Partial<Settings>
-  const blob = (await secureGet()) ?? ''
+  // vault 的 load 不会抛错：它把「读失败」表达成状态（read-error），
+  // 而不是让整个 loadSettings 挂掉 —— 否则供应商、模型、主题会一起回退成默认值，
+  // 用户看到的是「设置全没了」，比 Key 读不出严重得多。
+  const blob = await loadCredentialBlob()
   cachedKeys = parseKeyBlob(blob)
   const settings = sanitize(stored)
   // 把安全存储里的 key 填回各个供应商与媒体 API。
@@ -519,12 +548,10 @@ export async function persistSettings(settings: Settings): Promise<void> {
     imageApi: strippedImageApi,
     speechApi: strippedSpeechApi,
   })
-  if (blob !== cachedKeyBlob) {
-    if (blob === '{}') await secureRemove()
-    else await secureSet(blob)
-    cachedKeyBlob = blob
-    cachedKeys = keys
-  }
+  // 凭证写回统一走 vault：它会在 read-error 状态下拒绝任何写入/删除，
+  // 避免「用户只是改了个主题」把原有密文顺手清掉。
+  const outcome = await persistCredentialBlob(blob)
+  if (outcome !== 'skipped') cachedKeys = keys
 }
 
 /** 老版本存的是裸 key 字符串，这里兼容两种格式。 */

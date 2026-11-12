@@ -21,12 +21,18 @@
  * 协议参考 volcanicll/magpie-deepseek-web-auth（MIT）。
  */
 
-import { session as electronSession, app, type BrowserWindow } from 'electron'
+import { session as electronSession, app, safeStorage, type BrowserWindow } from 'electron'
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join, dirname, sep } from 'node:path'
 import { Worker } from 'node:worker_threads'
 import { PatchReader, iterSse } from './sse'
 import { powHeader, solvePow, type PowChallenge } from './pow'
+import {
+  createSessionStore,
+  type SessionPersistResult,
+  type WebSession,
+  type WebSessionIssue,
+} from './web-session'
 
 const CHAT_ORIGIN = 'https://chat.deepseek.com'
 const COMPLETION_PATH = '/api/v0/chat/completion'
@@ -50,11 +56,7 @@ function threadsFile(): string {
   return join(app.getPath('userData'), 'deepseek-web-threads.json')
 }
 
-export interface WebSession {
-  token: string
-  userAgent: string
-  savedAt: number
-}
+export type { WebSession, SessionPersistResult, WebSessionIssue } from './web-session'
 
 export class WebApiError extends Error {
   readonly kind: 'no-session' | 'expired' | 'http' | 'pow' | 'aborted' | 'network'
@@ -64,44 +66,43 @@ export class WebApiError extends Error {
   }
 }
 
-/* ------------------------------------------------------------------ */
-/* 登录态                                                              */
-/* ------------------------------------------------------------------ */
-
-let cachedSession: WebSession | null = null
+/**
+ * 登录态持久化。
+ *
+ * 逻辑全在 web-session.ts（那边可单测：写失败回滚内存、换账号失败让旧会话失效、
+ * 旧版明文迁移成功才替换）。这里只把真实的 safeStorage 与文件路径注入进去。
+ */
+const sessionStore = createSessionStore({
+  safe: {
+    isEncryptionAvailable: () => safeStorage.isEncryptionAvailable(),
+    encryptString: (plainText) => safeStorage.encryptString(plainText),
+    decryptString: (encrypted) => safeStorage.decryptString(encrypted),
+  },
+  file: sessionFile,
+})
 
 function loadSession(): WebSession | null {
-  if (cachedSession !== null) return cachedSession
-  try {
-    const parsed = JSON.parse(readFileSync(sessionFile(), 'utf8')) as WebSession
-    if (typeof parsed.token === 'string' && parsed.token !== '') cachedSession = parsed
-  } catch {
-    /* 没有存档是正常状态 */
-  }
-  return cachedSession
+  return sessionStore.load()
 }
 
-function saveSession(next: WebSession): void {
-  cachedSession = next
-  try {
-    mkdirSync(dirname(sessionFile()), { recursive: true })
-    writeFileSync(sessionFile(), JSON.stringify(next, null, 2), 'utf8')
-  } catch {
-    /* 写不进去就只用内存里的 */
-  }
+function saveSession(
+  next: WebSession,
+  options: { invalidateStale?: boolean } = {},
+): SessionPersistResult {
+  return sessionStore.save(next, options)
 }
 
 export function hasWebSession(): boolean {
-  return loadSession() !== null
+  return sessionStore.load() !== null
 }
 
 export function forgetWebSession(): void {
-  cachedSession = null
-  try {
-    writeFileSync(sessionFile(), '', 'utf8')
-  } catch {
-    /* 忽略 */
-  }
+  sessionStore.forget()
+}
+
+/** 取走一次待提示的会话问题（迁移失败 / 保存失败），取完即清。 */
+export function takeWebSessionIssue(): WebSessionIssue | null {
+  return sessionStore.takeIssue()
 }
 
 /* ------------------------------------------------------------------ */
@@ -118,7 +119,13 @@ const READ_TOKEN_JS = `(() => {
   } catch (e) { return null; }
 })()`
 
-export async function captureSessionFromWindow(win: BrowserWindow): Promise<WebSession | null> {
+/** 采集结果：既要拿到会话，也要拿到「有没有真的存下来」。 */
+export interface CapturedSession {
+  session: WebSession
+  persist: SessionPersistResult
+}
+
+export async function captureSessionFromWindow(win: BrowserWindow): Promise<CapturedSession | null> {
   const token = await win.webContents
     .executeJavaScript(READ_TOKEN_JS, true)
     .catch(() => null) as string | null
@@ -131,8 +138,10 @@ export async function captureSessionFromWindow(win: BrowserWindow): Promise<WebS
     userAgent: userAgent !== '' ? userAgent : 'Mozilla/5.0',
     savedAt: Date.now(),
   }
-  saveSession(next)
-  return next
+  // 这是「登录/换账号」路径：写失败时必须让盘上的旧会话失效，否则重启会复活旧账号。
+  const persist = saveSession(next, { invalidateStale: true })
+  if (!persist.ok) sessionStore.reportIssue({ kind: 'save-failed', message: persist.message })
+  return { session: next, persist }
 }
 
 /* ------------------------------------------------------------------ */

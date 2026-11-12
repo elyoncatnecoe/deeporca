@@ -1,10 +1,18 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, net, protocol, safeStorage, session, shell } from 'electron'
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
-import { dirname, join, normalize, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { closeAllStdio, closeStdio, notifyStdio, requestStdio } from './mcp-stdio'
+import { resolveAppPath } from './app-protocol-path'
+import { isAllowedMainWindowNavigation, isTrustedIpcSenderUrl } from './trust'
+import {
+  type SafeStorageLike,
+  readSecureValue,
+  removeSecureValue,
+  writeSecureValue,
+} from './secure-store'
 import { webRelayScript } from '../src/lib/web-relay'
 import {
   WebApiError,
@@ -13,6 +21,7 @@ import {
   diagnose,
   forgetWebSession,
   hasWebSession,
+  takeWebSessionIssue,
   verifySession,
   uploadWebFile,
   webSend,
@@ -65,12 +74,20 @@ function mimeOf(path: string): string {
 
 function registerAppProtocol(): void {
   protocol.handle('app', async (request) => {
-    const url = new URL(request.url)
-    const pathname = decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname)
-    const root = distRoot()
-    const target = normalize(join(root, pathname))
-    if (!target.startsWith(root)) return new Response('forbidden', { status: 403 })
+    // 路径判断（host / 解码 / 越界）全部在 app-protocol-path.ts，那边有回归测试；
+    // 这里只负责把解析结果变成 HTTP 响应。
+    const resolved = resolveAppPath(distRoot(), request.url)
+    if (!resolved.ok) return new Response('forbidden', { status: 403 })
+    const target = resolved.target
     if (!existsSync(target)) return new Response('not found', { status: 404 })
+    // 命中目录时 readFileSync 会抛 EISDIR，直接当 404 更符合预期。
+    let isFile = false
+    try {
+      isFile = statSync(target).isFile()
+    } catch {
+      return new Response('not found', { status: 404 })
+    }
+    if (!isFile) return new Response('not found', { status: 404 })
     return new Response(readFileSync(target), {
       headers: { 'Content-Type': mimeOf(target) },
     })
@@ -81,34 +98,11 @@ function secureFile(): string {
   return join(app.getPath('userData'), 'secure.json')
 }
 
-function readSecureStore(): Record<string, string> {
-  try {
-    return JSON.parse(readFileSync(secureFile(), 'utf8')) as Record<string, string>
-  } catch {
-    return {}
-  }
-}
-
-async function writeSecureStore(store: Record<string, string>): Promise<void> {
-  await mkdir(dirname(secureFile()), { recursive: true })
-  writeFileSync(secureFile(), JSON.stringify(store), 'utf8')
-}
-
-function encrypt(value: string): string {
-  if (safeStorage.isEncryptionAvailable()) {
-    return `enc:${safeStorage.encryptString(value).toString('base64')}`
-  }
-  return `raw:${Buffer.from(value, 'utf8').toString('base64')}`
-}
-
-function decrypt(value: string): string | null {
-  try {
-    if (value.startsWith('enc:')) return safeStorage.decryptString(Buffer.from(value.slice(4), 'base64'))
-    if (value.startsWith('raw:')) return Buffer.from(value.slice(4), 'base64').toString('utf8')
-    return null
-  } catch {
-    return null
-  }
+/** 判断逻辑在 secure-store.ts（可单测），这里只注入真实的 safeStorage 与文件路径。 */
+const safeStorageLike: SafeStorageLike = {
+  isEncryptionAvailable: () => safeStorage.isEncryptionAvailable(),
+  encryptString: (plainText) => safeStorage.encryptString(plainText),
+  decryptString: (encrypted) => safeStorage.decryptString(encrypted),
 }
 
 function isAllowedNavigation(raw: string): boolean {
@@ -132,27 +126,21 @@ function isAllowedNavigation(raw: string): boolean {
  *   2. 每个 IPC 入口先验来源（下面这两个包装器）。
  */
 
-/** 这个 URL 是不是「我们自己的页面」。 */
-function isTrustedFrameUrl(raw: string): boolean {
-  // 沙箱预览用的是 srcdoc，URL 就是 about:srcdoc；它们拿不到 IPC（见下面的 parent 检查）。
-  if (raw === 'about:blank' || raw === 'about:srcdoc') return true
-  try {
-    const url = new URL(raw)
-    if (url.protocol === 'app:') return url.hostname === 'deepsea'
-    const devUrl = process.env.DEEPSEA_DEV_URL
-    if (devUrl !== undefined && devUrl !== '') return url.origin === new URL(devUrl).origin
-    return false
-  } catch {
-    return false
-  }
-}
+/*
+ * URL 级判断在 trust.ts（可单测）；这里保留 frame 级的守卫，因为 Electron 的
+ * event.senderFrame 类型只在这一层可用。
+ *
+ * 两者合起来的语义：只接受主窗口顶层框架、且地址是我们自己的页面。
+ * about:blank / about:srcdoc 不再享有任何白名单（见 trust.ts 的说明）。
+ */
 
 /** 只接受主窗口顶层框架的调用：子框架一律不认。 */
 function isTrustedSender(event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent): boolean {
   const frame = event.senderFrame
   if (frame === null) return false
+  // 沙箱预览用 srcdoc / about:blank，但它们的 parent 不为 null，这里直接挡掉。
   if (frame.parent !== null) return false
-  return isTrustedFrameUrl(frame.url)
+  return isTrustedIpcSenderUrl(frame.url, process.env.DEEPSEA_DEV_URL)
 }
 
 /* 参数类型跟 ipcMain 本身一致，这里不追求更精确的泛型。 */
@@ -473,13 +461,15 @@ async function createWindow(): Promise<void> {
   // 主窗口不许导航走：模型输出里一个普通链接就能把整个 App 换成别的页面，
   // 而那个页面会拿到完整的 window.deepsea 桥（BUG-REVIEW P0-3）。
   // 外部链接交给系统浏览器，App 自己不动。
+  // 注意用的是「导航白名单」而不是 IPC 的来源判断：以前两者共用一个函数，
+  // 里面的 about:blank 例外等于把这条保护自己开了个口子。
   mainWindow.webContents.on('will-navigate', (event, url) => {
-    if (isTrustedFrameUrl(url)) return
+    if (isAllowedMainWindowNavigation(url, process.env.DEEPSEA_DEV_URL)) return
     event.preventDefault()
     openExternal(url)
   })
   mainWindow.webContents.on('will-redirect', (event, url) => {
-    if (isTrustedFrameUrl(url)) return
+    if (isAllowedMainWindowNavigation(url, process.env.DEEPSEA_DEV_URL)) return
     event.preventDefault()
   })
   // 子框架不单独拦：这一版 Electron 的类型里还没有 will-frame-navigate，
@@ -714,20 +704,20 @@ if (!singleInstance) {
       return true
     })
 
-    trustedHandle('secure:get', () => {
-      const stored = readSecureStore().apiKey
-      return stored === undefined ? null : decrypt(stored)
-    })
+    /*
+     * 读凭证：返回 `{ value, status }` 而不是裸字符串。
+     *
+     * 只回 `string | null` 的话，「读失败」和「没配置」在渲染层无法区分，上层只能
+     * 猜 —— 猜错的代价是把用户还能恢复的密文覆盖掉。status 的三种取值见
+     * secure-store.ts（读/写/迁移的完整逻辑都在那边，有单测）。
+     */
+    trustedHandle('secure:get', async () => readSecureValue(safeStorageLike, secureFile()))
     trustedHandle('secure:set', async (_event, value: string) => {
-      const store = readSecureStore()
-      store.apiKey = encrypt(value)
-      await writeSecureStore(store)
+      if (typeof value !== 'string') throw new Error('secure:set 需要一个字符串')
+      // 加密不可用时 encryptValue 抛在写盘之前，原密文不受影响。
+      writeSecureValue(safeStorageLike, secureFile(), value)
     })
-    trustedHandle('secure:remove', async () => {
-      const store = readSecureStore()
-      delete store.apiKey
-      await writeSecureStore(store)
-    })
+    trustedHandle('secure:remove', async () => removeSecureValue(secureFile()))
     trustedHandle('webchat:open', (_event, css: string, js: string) => {
       openWebChat(
         typeof css === 'string' ? css.slice(0, 200_000) : '',
@@ -829,6 +819,15 @@ if (!singleInstance) {
       while (Date.now() < deadline) {
         const captured = await captureSessionFromWindow(win)
         if (captured !== null) {
+          // 存不下来就别假装登录成功：内存已经回滚、盘上的旧会话也已失效，
+          // 这里如实告诉用户原因，否则重启后会莫名其妙回到旧账号。
+          if (!captured.persist.ok) {
+            forgetWebSession()
+            return {
+              ok: false,
+              error: `${captured.persist.message}；为避免下次启动恢复旧账号，本地登录态已清除`,
+            }
+          }
           // 验证 token 真的能用，避免存下一个过期的登录态。
           const verified = await verifySession()
           if (verified.ok) {
@@ -848,8 +847,18 @@ if (!singleInstance) {
       return { ok: false, error: '登录超时了；请重试一次' }
     })
 
-    /** 自检：登录态 / 接口 / PoW 分别探一遍，返回给设置页显示。 */
-    trustedHandle('webapi:diagnose', async () => diagnose())
+    /**
+     * 自检：登录态 / 接口 / PoW 分别探一遍，返回给设置页显示。
+     *
+     * 顺带把「登录态迁移失败」这类没有独立 UI 入口的问题带出去 —— 否则用户只会
+     * 看到「未登录」，却不知道盘上那份旧明文还没升级成功。
+     */
+    trustedHandle('webapi:diagnose', async () => {
+      const result = await diagnose()
+      const issue = takeWebSessionIssue()
+      if (issue !== null) result.notes.push(`网页登录态：${issue.message}`)
+      return result
+    })
 
     /** 本机是否已经有可用的网页登录态。 */
     trustedHandle('webapi:has-session', async () => {
@@ -865,6 +874,13 @@ if (!singleInstance) {
       if (win === null) return { ok: false, error: 'no-window' }
       const captured = await captureSessionFromWindow(win)
       if (captured === null) return { ok: false, error: '还没登录：窗口里没有 userToken' }
+      if (!captured.persist.ok) {
+        forgetWebSession()
+        return {
+          ok: false,
+          error: `${captured.persist.message}；为避免下次启动恢复旧账号，本地登录态已清除`,
+        }
+      }
       return { ok: true }
     })
 
