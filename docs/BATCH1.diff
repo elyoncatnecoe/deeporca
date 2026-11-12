@@ -1,0 +1,2004 @@
+﻿diff --git "a/_backup-review-fix-b1-20261112-151000\\electron\\main.ts" "b/electron\\main.ts"
+index a14d552..0d0d19d 100644
+--- "a/_backup-review-fix-b1-20261112-151000\\electron\\main.ts"
++++ "b/electron\\main.ts"
+@@ -1,10 +1,18 @@
+ import { app, BrowserWindow, dialog, ipcMain, Menu, net, protocol, safeStorage, session, shell } from 'electron'
+ import { randomUUID } from 'node:crypto'
+-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
++import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+ import { mkdir } from 'node:fs/promises'
+-import { dirname, join, normalize, resolve } from 'node:path'
++import { dirname, join, resolve } from 'node:path'
+ import { pathToFileURL } from 'node:url'
+ import { closeAllStdio, closeStdio, notifyStdio, requestStdio } from './mcp-stdio'
++import { resolveAppPath } from './app-protocol-path'
++import { isAllowedMainWindowNavigation, isTrustedIpcSenderUrl } from './trust'
++import {
++  type SafeStorageLike,
++  readSecureValue,
++  removeSecureValue,
++  writeSecureValue,
++} from './secure-store'
+ import { webRelayScript } from '../src/lib/web-relay'
+ import {
+   WebApiError,
+@@ -65,12 +73,20 @@ function mimeOf(path: string): string {
+ 
+ function registerAppProtocol(): void {
+   protocol.handle('app', async (request) => {
+-    const url = new URL(request.url)
+-    const pathname = decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname)
+-    const root = distRoot()
+-    const target = normalize(join(root, pathname))
+-    if (!target.startsWith(root)) return new Response('forbidden', { status: 403 })
++    // 路径判断（host / 解码 / 越界）全部在 app-protocol-path.ts，那边有回归测试；
++    // 这里只负责把解析结果变成 HTTP 响应。
++    const resolved = resolveAppPath(distRoot(), request.url)
++    if (!resolved.ok) return new Response('forbidden', { status: 403 })
++    const target = resolved.target
+     if (!existsSync(target)) return new Response('not found', { status: 404 })
++    // 命中目录时 readFileSync 会抛 EISDIR，直接当 404 更符合预期。
++    let isFile = false
++    try {
++      isFile = statSync(target).isFile()
++    } catch {
++      return new Response('not found', { status: 404 })
++    }
++    if (!isFile) return new Response('not found', { status: 404 })
+     return new Response(readFileSync(target), {
+       headers: { 'Content-Type': mimeOf(target) },
+     })
+@@ -81,34 +97,11 @@ function secureFile(): string {
+   return join(app.getPath('userData'), 'secure.json')
+ }
+ 
+-function readSecureStore(): Record<string, string> {
+-  try {
+-    return JSON.parse(readFileSync(secureFile(), 'utf8')) as Record<string, string>
+-  } catch {
+-    return {}
+-  }
+-}
+-
+-async function writeSecureStore(store: Record<string, string>): Promise<void> {
+-  await mkdir(dirname(secureFile()), { recursive: true })
+-  writeFileSync(secureFile(), JSON.stringify(store), 'utf8')
+-}
+-
+-function encrypt(value: string): string {
+-  if (safeStorage.isEncryptionAvailable()) {
+-    return `enc:${safeStorage.encryptString(value).toString('base64')}`
+-  }
+-  return `raw:${Buffer.from(value, 'utf8').toString('base64')}`
+-}
+-
+-function decrypt(value: string): string | null {
+-  try {
+-    if (value.startsWith('enc:')) return safeStorage.decryptString(Buffer.from(value.slice(4), 'base64'))
+-    if (value.startsWith('raw:')) return Buffer.from(value.slice(4), 'base64').toString('utf8')
+-    return null
+-  } catch {
+-    return null
+-  }
++/** 判断逻辑在 secure-store.ts（可单测），这里只注入真实的 safeStorage 与文件路径。 */
++const safeStorageLike: SafeStorageLike = {
++  isEncryptionAvailable: () => safeStorage.isEncryptionAvailable(),
++  encryptString: (plainText) => safeStorage.encryptString(plainText),
++  decryptString: (encrypted) => safeStorage.decryptString(encrypted),
+ }
+ 
+ function isAllowedNavigation(raw: string): boolean {
+@@ -132,27 +125,21 @@ function isAllowedNavigation(raw: string): boolean {
+  *   2. 每个 IPC 入口先验来源（下面这两个包装器）。
+  */
+ 
+-/** 这个 URL 是不是「我们自己的页面」。 */
+-function isTrustedFrameUrl(raw: string): boolean {
+-  // 沙箱预览用的是 srcdoc，URL 就是 about:srcdoc；它们拿不到 IPC（见下面的 parent 检查）。
+-  if (raw === 'about:blank' || raw === 'about:srcdoc') return true
+-  try {
+-    const url = new URL(raw)
+-    if (url.protocol === 'app:') return url.hostname === 'deepsea'
+-    const devUrl = process.env.DEEPSEA_DEV_URL
+-    if (devUrl !== undefined && devUrl !== '') return url.origin === new URL(devUrl).origin
+-    return false
+-  } catch {
+-    return false
+-  }
+-}
++/*
++ * URL 级判断在 trust.ts（可单测）；这里保留 frame 级的守卫，因为 Electron 的
++ * event.senderFrame 类型只在这一层可用。
++ *
++ * 两者合起来的语义：只接受主窗口顶层框架、且地址是我们自己的页面。
++ * about:blank / about:srcdoc 不再享有任何白名单（见 trust.ts 的说明）。
++ */
+ 
+ /** 只接受主窗口顶层框架的调用：子框架一律不认。 */
+ function isTrustedSender(event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent): boolean {
+   const frame = event.senderFrame
+   if (frame === null) return false
++  // 沙箱预览用 srcdoc / about:blank，但它们的 parent 不为 null，这里直接挡掉。
+   if (frame.parent !== null) return false
+-  return isTrustedFrameUrl(frame.url)
++  return isTrustedIpcSenderUrl(frame.url, process.env.DEEPSEA_DEV_URL)
+ }
+ 
+ /* 参数类型跟 ipcMain 本身一致，这里不追求更精确的泛型。 */
+@@ -473,13 +460,15 @@ async function createWindow(): Promise<void> {
+   // 主窗口不许导航走：模型输出里一个普通链接就能把整个 App 换成别的页面，
+   // 而那个页面会拿到完整的 window.deepsea 桥（BUG-REVIEW P0-3）。
+   // 外部链接交给系统浏览器，App 自己不动。
++  // 注意用的是「导航白名单」而不是 IPC 的来源判断：以前两者共用一个函数，
++  // 里面的 about:blank 例外等于把这条保护自己开了个口子。
+   mainWindow.webContents.on('will-navigate', (event, url) => {
+-    if (isTrustedFrameUrl(url)) return
++    if (isAllowedMainWindowNavigation(url)) return
+     event.preventDefault()
+     openExternal(url)
+   })
+   mainWindow.webContents.on('will-redirect', (event, url) => {
+-    if (isTrustedFrameUrl(url)) return
++    if (isAllowedMainWindowNavigation(url)) return
+     event.preventDefault()
+   })
+   // 子框架不单独拦：这一版 Electron 的类型里还没有 will-frame-navigate，
+@@ -714,20 +703,20 @@ if (!singleInstance) {
+       return true
+     })
+ 
+-    trustedHandle('secure:get', () => {
+-      const stored = readSecureStore().apiKey
+-      return stored === undefined ? null : decrypt(stored)
+-    })
++    /*
++     * 读凭证：返回 `{ value, status }` 而不是裸字符串。
++     *
++     * 只回 `string | null` 的话，「读失败」和「没配置」在渲染层无法区分，上层只能
++     * 猜 —— 猜错的代价是把用户还能恢复的密文覆盖掉。status 的三种取值见
++     * secure-store.ts（读/写/迁移的完整逻辑都在那边，有单测）。
++     */
++    trustedHandle('secure:get', async () => readSecureValue(safeStorageLike, secureFile()))
+     trustedHandle('secure:set', async (_event, value: string) => {
+-      const store = readSecureStore()
+-      store.apiKey = encrypt(value)
+-      await writeSecureStore(store)
+-    })
+-    trustedHandle('secure:remove', async () => {
+-      const store = readSecureStore()
+-      delete store.apiKey
+-      await writeSecureStore(store)
++      if (typeof value !== 'string') throw new Error('secure:set 需要一个字符串')
++      // 加密不可用时 encryptValue 抛在写盘之前，原密文不受影响。
++      writeSecureValue(safeStorageLike, secureFile(), value)
+     })
++    trustedHandle('secure:remove', async () => removeSecureValue(secureFile()))
+     trustedHandle('webchat:open', (_event, css: string, js: string) => {
+       openWebChat(
+         typeof css === 'string' ? css.slice(0, 200_000) : '',
+diff --git "a/_backup-review-fix-b1-20261112-151000\\electron\\deepseek-api.ts" "b/electron\\deepseek-api.ts"
+index f5474fd..7e78728 100644
+--- "a/_backup-review-fix-b1-20261112-151000\\electron\\deepseek-api.ts"
++++ "b/electron\\deepseek-api.ts"
+@@ -21,8 +21,8 @@
+  * 协议参考 volcanicll/magpie-deepseek-web-auth（MIT）。
+  */
+ 
+-import { session as electronSession, app, type BrowserWindow } from 'electron'
+-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
++import { session as electronSession, app, safeStorage, type BrowserWindow } from 'electron'
++import { existsSync, readFileSync, unlinkSync, writeFileSync, mkdirSync } from 'node:fs'
+ import { join, dirname, sep } from 'node:path'
+ import { Worker } from 'node:worker_threads'
+ import { PatchReader, iterSse } from './sse'
+@@ -56,6 +56,19 @@ export interface WebSession {
+   savedAt: number
+ }
+ 
++/**
++ * 落盘形状。
++ *
++ * `sealed === true` 时 `token` 是 safeStorage 的密文（Base64）；缺省表示旧版
++ * 明文格式，只为迁移而兼容读取，读到会立刻升级。
++ */
++interface StoredSession {
++  token: string
++  userAgent: string
++  savedAt: number
++  sealed?: boolean
++}
++
+ export class WebApiError extends Error {
+   readonly kind: 'no-session' | 'expired' | 'http' | 'pow' | 'aborted' | 'network'
+   constructor(kind: WebApiError['kind'], message: string) {
+@@ -70,11 +83,72 @@ export class WebApiError extends Error {
+ 
+ let cachedSession: WebSession | null = null
+ 
++/** 用系统密钥存储（Windows DPAPI / macOS Keychain）加密 token；不可用返回 null。 */
++function sealToken(token: string): string | null {
++  if (!safeStorage.isEncryptionAvailable()) return null
++  try {
++    return safeStorage.encryptString(token).toString('base64')
++  } catch {
++    return null
++  }
++}
++
++function unsealToken(stored: StoredSession): string | null {
++  if (stored.sealed === true) {
++    try {
++      return safeStorage.decryptString(Buffer.from(stored.token, 'base64'))
++    } catch {
++      // 解密失败多半是密钥暂时不可用（换用户 / 系统锁屏）。此时既不能当成
++      // 「已登录」，也不能删文件 —— 删了就真找不回来了。
++      return null
++    }
++  }
++  // 旧版明文格式。
++  return stored.token
++}
++
++/**
++ * 把登录态写盘，成功返回 true。
++ *
++ * 拿不到系统密钥存储时**拒绝持久化**：这个 token 是可直接使用的 Bearer 凭证，
++ * 明文写进 userData 等于谁读到文件谁就能用。宁可让用户下次重新登录。
++ */
++function writeSessionFile(next: WebSession): boolean {
++  const sealed = sealToken(next.token)
++  if (sealed === null) {
++    console.warn('[deepseek-api] 系统密钥存储不可用，网页登录态只保留在内存里，不落盘')
++    return false
++  }
++  try {
++    mkdirSync(dirname(sessionFile()), { recursive: true })
++    const payload: StoredSession = {
++      token: sealed,
++      userAgent: next.userAgent,
++      savedAt: next.savedAt,
++      sealed: true,
++    }
++    writeFileSync(sessionFile(), JSON.stringify(payload, null, 2), 'utf8')
++    return true
++  } catch {
++    return false
++  }
++}
++
+ function loadSession(): WebSession | null {
+   if (cachedSession !== null) return cachedSession
+   try {
+-    const parsed = JSON.parse(readFileSync(sessionFile(), 'utf8')) as WebSession
+-    if (typeof parsed.token === 'string' && parsed.token !== '') cachedSession = parsed
++    const parsed = JSON.parse(readFileSync(sessionFile(), 'utf8')) as StoredSession
++    const token = unsealToken(parsed)
++    if (typeof token !== 'string' || token === '') return null
++    cachedSession = {
++      token,
++      userAgent: typeof parsed.userAgent === 'string' && parsed.userAgent !== ''
++        ? parsed.userAgent
++        : 'Mozilla/5.0',
++      savedAt: typeof parsed.savedAt === 'number' ? parsed.savedAt : Date.now(),
++    }
++    // 旧版明文登录态：读到就立刻升级成密文，别让它继续躺在盘上。
++    if (parsed.sealed !== true) writeSessionFile(cachedSession)
+   } catch {
+     /* 没有存档是正常状态 */
+   }
+@@ -83,12 +157,7 @@ function loadSession(): WebSession | null {
+ 
+ function saveSession(next: WebSession): void {
+   cachedSession = next
+-  try {
+-    mkdirSync(dirname(sessionFile()), { recursive: true })
+-    writeFileSync(sessionFile(), JSON.stringify(next, null, 2), 'utf8')
+-  } catch {
+-    /* 写不进去就只用内存里的 */
+-  }
++  writeSessionFile(next)
+ }
+ 
+ export function hasWebSession(): boolean {
+@@ -97,10 +166,20 @@ export function hasWebSession(): boolean {
+ 
+ export function forgetWebSession(): void {
+   cachedSession = null
++  const file = sessionFile()
+   try {
+-    writeFileSync(sessionFile(), '', 'utf8')
++    unlinkSync(file)
++    return
++  } catch (error) {
++    // 本来就没有文件是正常状态。
++    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
++  }
++  // 删不掉（文件被占用等）就退一步截断：至少别让旧 token 还能被下次启动读回来。
++  // 以前只写空串、且把写失败一起吞掉 —— 那种情况下旧 token 会原样留着并被复活。
++  try {
++    writeFileSync(file, '', 'utf8')
+   } catch {
+-    /* 忽略 */
++    console.warn('[deepseek-api] 网页登录态文件既删不掉也写不动，可能仍留在磁盘上')
+   }
+ }
+ 
+diff --git "a/_backup-review-fix-b1-20261112-151000\\electron\\preload.ts" "b/electron\\preload.ts"
+index d4d2aa2..f2007bf 100644
+--- "a/_backup-review-fix-b1-20261112-151000\\electron\\preload.ts"
++++ "b/electron\\preload.ts"
+@@ -32,7 +32,8 @@ type HttpBridge = {
+ const api: DeepSeaBridge & HttpBridge = {
+   platform: 'electron',
+   version: ipcRenderer.sendSync('app:version') as string,
+-  secureGet: () => ipcRenderer.invoke('secure:get') as Promise<string | null>,
++  secureGet: () =>
++    ipcRenderer.invoke('secure:get') as Promise<{ value: string | null; status: 'available' | 'unavailable' | 'read-error' }>,
+   secureSet: (value: string) => ipcRenderer.invoke('secure:set', value) as Promise<void>,
+   secureRemove: () => ipcRenderer.invoke('secure:remove') as Promise<void>,
+   openWebChat: (css: string, js: string) => ipcRenderer.invoke('webchat:open', css, js) as Promise<void>,
+diff --git "a/_backup-review-fix-b1-20261112-151000\\src\\lib\\platform.ts" "b/src\\lib\\platform.ts"
+index 93ed064..cd06b07 100644
+--- "a/_backup-review-fix-b1-20261112-151000\\src\\lib\\platform.ts"
++++ "b/src\\lib\\platform.ts"
+@@ -6,6 +6,17 @@ import { Share } from '@capacitor/share'
+ import { StatusBar, Style } from '@capacitor/status-bar'
+ import { GALLERY_ALBUM, base64ToBytes, splitDataUrl } from './photo-store'
+ import type { DeepSeaBridge } from './global'
++import {
++  SecureStorageError,
++  androidSecureGet,
++  androidSecureRemove,
++  androidSecureSet,
++  type AndroidSecureDeps,
++} from './android-secure'
++import type { SecureStorageStatus } from './secure-types'
++
++/** 供 store 等上层捕获；真正的定义在 android-secure.ts。 */
++export { SecureStorageError } from './android-secure'
+ 
+ interface SecureStorePlugin {
+   get: () => Promise<{ value: string | null }>
+@@ -46,47 +57,79 @@ export const isWeb = !isAndroid && !isElectron
+ 
+ const bridge = (): DeepSeaBridge | undefined => (typeof window === 'undefined' ? undefined : window.deepsea)
+ 
+-export async function secureGet(): Promise<string | null> {
++/**
++ * 旧版降级路径写过的明文槽位。
++ *
++ * 历史实现里 Keystore 调用失败会 `localStorage.setItem('deepsea.apiKey', value)`，
++ * 于是老用户的 Key 可能还明文躺在这里。现在**只读一次做迁移**，不再往里写。
++ */
++const LEGACY_KEY = 'deepsea.apiKey'
++
++/** 把真实运行时依赖注入给纯逻辑层（判断规则都在 android-secure.ts，那边可单测）。 */
++function androidSecureDeps(): AndroidSecureDeps {
++  return {
++    pluginGet: async () => (await Secure.get()).value,
++    pluginSet: (value) => Secure.set({ value }),
++    pluginRemove: () => Secure.remove(),
++    legacyGet: () => localStorage.getItem(LEGACY_KEY),
++    legacyRemove: () => localStorage.removeItem(LEGACY_KEY),
++  }
++}
++
++export interface SecureReadResult {
++  value: string | null
++  status: SecureStorageStatus
++}
++
++/**
++ * 读凭证，**同时报告状态**。
++ *
++ * 只返回 `string | null` 的话，「读失败」和「没配置」在类型上无法区分，
++ * 上层只能猜 —— 而猜错的代价是把用户还能恢复的密文覆盖掉。
++ */
++export async function secureRead(): Promise<SecureReadResult> {
+   const native = bridge()
+-  if (native) return native.secureGet()
+-  if (isAndroid) {
++  if (native) {
+     try {
+-      return (await Secure.get()).value
++      return await native.secureGet()
+     } catch {
+-      return localStorage.getItem('deepsea.apiKey')
++      // IPC 抛错（解密失败 / 主进程异常）：无法确认原凭证状态。
++      return { value: null, status: 'read-error' }
+     }
+   }
+-  return localStorage.getItem('deepsea.apiKey')
++  if (isAndroid) return await androidSecureGet(androidSecureDeps())
++  // 纯浏览器预览：localStorage 就是它唯一的存储，没有系统密钥存储可用。
++  // 这是已记录的设计取舍（README 有说明），不是静默降级。
++  return { value: localStorage.getItem(LEGACY_KEY), status: 'available' }
+ }
+ 
+ export async function secureSet(value: string): Promise<void> {
+   const native = bridge()
+-  if (native) return native.secureSet(value)
+-  if (isAndroid) {
++  if (native) {
+     try {
+-      await Secure.set({ value })
+-      return
+-    } catch {
+-      localStorage.setItem('deepsea.apiKey', value)
+-      return
++      return await native.secureSet(value)
++    } catch (error) {
++      const detail = error instanceof Error ? error.message : String(error)
++      throw new SecureStorageError(`系统安全存储不可用（${detail}）`)
+     }
+   }
+-  localStorage.setItem('deepsea.apiKey', value)
++  if (isAndroid) return await androidSecureSet(androidSecureDeps(), value)
++  // 纯浏览器预览，同 secureRead 的说明。
++  localStorage.setItem(LEGACY_KEY, value)
+ }
+ 
+ export async function secureRemove(): Promise<void> {
+   const native = bridge()
+-  if (native) return native.secureRemove()
+-  if (isAndroid) {
++  if (native) {
+     try {
+-      await Secure.remove()
+-      return
+-    } catch {
+-      localStorage.removeItem('deepsea.apiKey')
+-      return
++      return await native.secureRemove()
++    } catch (error) {
++      const detail = error instanceof Error ? error.message : String(error)
++      throw new SecureStorageError(`系统安全存储不可用（${detail}）`)
+     }
+   }
+-  localStorage.removeItem('deepsea.apiKey')
++  if (isAndroid) return await androidSecureRemove(androidSecureDeps())
++  localStorage.removeItem(LEGACY_KEY)
+ }
+ 
+ /**
+diff --git "a/_backup-review-fix-b1-20261112-151000\\src\\lib\\settings.ts" "b/src\\lib\\settings.ts"
+index 37ce6ed..bd55f3a 100644
+--- "a/_backup-review-fix-b1-20261112-151000\\src\\lib\\settings.ts"
++++ "b/src\\lib\\settings.ts"
+@@ -24,7 +24,10 @@ import {
+ } from './types'
+ import { migrateLegacyProvider, settleProviderOnBoot } from './providers'
+ import { clampNumber, resolveProtocol } from './normalize'
+-import { secureGet, secureRemove, secureSet } from './platform'
++import { getCredentialVault } from './secure-credentials'
++import type { SecureStorageStatus } from './secure-types'
++
++export { SECURE_READ_ERROR_MESSAGE, SECURE_UNAVAILABLE_MESSAGE } from './secure-types'
+ 
+ /**
+  * 内置助手头像的白名单 key。
+@@ -40,8 +43,31 @@ let cachedKeys: Record<string, string> = {}
+ /** 媒体 API 的 Key 使用保留槽位名，避免和 provider id 撞名。 */
+ const MEDIA_IMAGE_KEY = 'media:image'
+ const MEDIA_SPEECH_KEY = 'media:speech'
+-/** 上次写入安全存储的原始 blob，用来判断要不要重写。 */
+-let cachedKeyBlob = ''
++
++/**
++ * 安全存储的当前状态。
++ *
++ * 由 credential vault 维护，不在 settings 里另存一份 —— 两份状态迟早会不一致，
++ * 而不一致的那一次就会把用户凭证覆盖掉。
++ */
++export function getSecureStorageStatus(): SecureStorageStatus {
++  return getCredentialVault().getStatus()
++}
++
++/**
++ * 读凭证 blob。
++ *
++ * `loadSettings` 与单测都走这里：不碰 IndexedDB，所以能在 node 里直接跑状态机
++ * （node 没有 indexedDB，但凭证状态恰恰是最需要回归测试的部分）。
++ */
++export async function loadCredentialBlob(): Promise<string> {
++  return await getCredentialVault().load()
++}
++
++/** 写凭证 blob。`persistSettings` 与单测都走这里。 */
++export async function persistCredentialBlob(blob: string): Promise<'written' | 'removed' | 'skipped'> {
++  return await getCredentialVault().persist(blob)
++}
+ 
+ const THEMES: readonly ThemeId[] = ['deep', 'iceberg', 'tropical']
+ const QUALITIES: readonly QualityId[] = ['auto', 'low', 'medium', 'high']
+@@ -477,7 +503,10 @@ export function sanitize(raw: Partial<Settings>): Settings {
+ export async function loadSettings(): Promise<Settings> {
+   const raw = await getAllSettings()
+   const stored = (raw.app ?? {}) as Partial<Settings>
+-  const blob = (await secureGet()) ?? ''
++  // vault 的 load 不会抛错：它把「读失败」表达成状态（read-error），
++  // 而不是让整个 loadSettings 挂掉 —— 否则供应商、模型、主题会一起回退成默认值，
++  // 用户看到的是「设置全没了」，比 Key 读不出严重得多。
++  const blob = await loadCredentialBlob()
+   cachedKeys = parseKeyBlob(blob)
+   const settings = sanitize(stored)
+   // 把安全存储里的 key 填回各个供应商与媒体 API。
+@@ -519,12 +548,10 @@ export async function persistSettings(settings: Settings): Promise<void> {
+     imageApi: strippedImageApi,
+     speechApi: strippedSpeechApi,
+   })
+-  if (blob !== cachedKeyBlob) {
+-    if (blob === '{}') await secureRemove()
+-    else await secureSet(blob)
+-    cachedKeyBlob = blob
+-    cachedKeys = keys
+-  }
++  // 凭证写回统一走 vault：它会在 read-error 状态下拒绝任何写入/删除，
++  // 避免「用户只是改了个主题」把原有密文顺手清掉。
++  const outcome = await persistCredentialBlob(blob)
++  if (outcome !== 'skipped') cachedKeys = keys
+ }
+ 
+ /** 老版本存的是裸 key 字符串，这里兼容两种格式。 */
+diff --git "a/_backup-review-fix-b1-20261112-151000\\src\\lib\\store.ts" "b/src\\lib\\store.ts"
+index 370d008..4a69316 100644
+--- "a/_backup-review-fix-b1-20261112-151000\\src\\lib\\store.ts"
++++ "b/src\\lib\\store.ts"
+@@ -18,7 +18,7 @@ import {
+   clearConversations,
+   clearMemories,
+ } from './db'
+-import { loadSettings, persistSettings } from './settings'
++import { loadSettings, persistSettings, getSecureStorageStatus, SECURE_READ_ERROR_MESSAGE, SECURE_UNAVAILABLE_MESSAGE } from './settings'
+ import { findAssistant, resolveAssistantConfig } from './assistant'
+ import { mirrorProviderFields, patchProvider, syncProviderToSettings } from './providers'
+ import { reconcileServers, setPolicyWriter } from './mcp-registry'
+@@ -32,6 +32,7 @@ import {
+   renameWorkspaceFile as renameWorkspaceFileRecord,
+ } from './workspace'
+ import { stageBridge } from './stage-bridge'
++import { SecureStorageError } from './platform'
+ import {
+   DEFAULT_SETTINGS,
+   DEFAULT_WORKSPACE,
+@@ -270,6 +271,23 @@ export const useAppStore = create<AppState>((set, get) => ({
+         screen: settings.onboardingDone ? 'home' : 'onboarding',
+       })
+ 
++      /*
++       * 安全存储状态必须让用户真的看见。
++       *
++       * read-error 意味着「我们不知道盘上还有没有一份能恢复的密文」——这时候
++       * 用户如果以为 Key 丢了、重新输入一遍，就会把那份密文覆盖掉。所以这里同时
++       * 用常驻 notice（Chat 顶部的 role="status" 条）和 toast，确保不被忽略。
++       * 文案刻意不含「API Key」三个字，避免触发 Chat 里那个「去填 Key」的链接
++       * （那等于引导用户重新输入，正是本状态要禁止的）。
++       */
++      const secureStatus = getSecureStorageStatus()
++      if (secureStatus === 'read-error') {
++        set({ notice: SECURE_READ_ERROR_MESSAGE })
++        get().actions.showToast(SECURE_READ_ERROR_MESSAGE)
++      } else if (secureStatus === 'unavailable') {
++        get().actions.showToast(SECURE_UNAVAILABLE_MESSAGE)
++      }
++
+       // 下面都是「有更好、没有也能用」的后置步骤，失败只记日志。
+       try {
+         // 恢复到上次所在界面（渲染进程被回收重载时尤其重要）。
+@@ -356,7 +374,18 @@ export const useAppStore = create<AppState>((set, get) => ({
+         next = mirrorProviderFields(next)
+       }
+       set({ settings: next })
+-      await persistSettings(next)
++      try {
++        await persistSettings(next)
++      } catch (error) {
++        // 凭证没能写进系统安全存储（Keystore / DPAPI 不可用）时，platform 层会
++        // 抛 SecureStorageError 而不是退回明文。这里必须让用户知道「这次没保存」，
++        // 否则他以为存好了、下次启动却发现 Key 不见了。
++        if (error instanceof SecureStorageError) {
++          get().actions.showToast(`${error.message}，这次的 API Key 没有保存`)
++        } else {
++          throw error
++        }
++      }
+       if (patch.aquariumTheme !== undefined) stageBridge.current?.setTheme(next.aquariumTheme)
+       // 助手设定 / 记忆相关变了，就把人设与记忆重新推给网页窗，
+       // 否则网页账号那边还在用旧人设说话。
+diff --git "a/_backup-review-fix-b1-20261112-151000\\src\\lib\\global.d.ts" "b/src\\lib\\global.d.ts"
+index eeaaf9f..82e59d1 100644
+--- "a/_backup-review-fix-b1-20261112-151000\\src\\lib\\global.d.ts"
++++ "b/src\\lib\\global.d.ts"
+@@ -48,7 +48,13 @@ export type HttpStreamEvent =
+ export interface DeepSeaBridge {
+   platform: 'electron'
+   version: string
+-  secureGet: () => Promise<string | null>
++  /**
++   * 读凭证。
++   *
++   * 必须同时带回状态：「读失败」和「没配置」在 `string | null` 上无法区分，
++   * 而猜错的代价是覆盖掉用户还能恢复的密文。
++   */
++  secureGet: () => Promise<{ value: string | null; status: 'available' | 'unavailable' | 'read-error' }>
+   secureSet: (value: string) => Promise<void>
+   secureRemove: () => Promise<void>
+   openWebChat: (css: string, js: string) => Promise<void>
+diff --git "a/_backup-review-fix-b1-20261112-151000\\README.md" b/README.md
+index aa6c084..5d0b065 100644
+--- "a/_backup-review-fix-b1-20261112-151000\\README.md"
++++ b/README.md
+@@ -113,7 +113,7 @@
+ 1. 启动后选择：
+    - **网页版 · 不用 Key**：直接打开官方网页，适合先试；
+    - **API 模式 · 完整体验**：填 Key。
+-2. API Key 在 [platform.deepseek.com](https://platform.deepseek.com/api_keys) 创建，只加密保存在本机（Windows 用 DPAPI，Android 用 Keystore AES-GCM）。
++2. API Key 在 [platform.deepseek.com](https://platform.deepseek.com/api_keys) 创建，只加密保存在本机（Windows 用 DPAPI，Android 用 Keystore AES-GCM）。**系统密钥存储不可用时不会降级成明文保存**：Key 只在本次运行内有效，并会明确提示你这次没存上。纯浏览器预览版没有系统密钥存储可用，只能用浏览器本地存储，安全性低于桌面/安卓端。
+ 3. 默认模型 `deepseek-flash`（支持看图）；也可以换成 `deepseek-v4-pro`、`deepseek-chat`、`deepseek-reasoner` 或自定义 OpenAI 兼容地址。
+ 4. 设置里可以改**界面色调**、自动记忆频率、思考强度、网页模式明暗，导出全部数据。
+    海底主题 / 虎鲸皮肤 / 画质在**布置**里改 —— 两者已经解绑，换一个不会带着另一个一起变。
+@@ -126,7 +126,8 @@
+ | 对话 / 记忆 / 工坊文件 | 本机 IndexedDB | 不上传 |
+ | 生成图片 / 语音 | 本机 IndexedDB `media` 表 | 只在本机；不进备份，删除消息/对话时清理 |
+ | 附件 | 随消息发给你配置的 API | 图片会先在本机压缩；不经过深鲸的服务器 |
+-| API Key | Windows DPAPI / Android Keystore | 不写日志、不导出 |
++| API Key | Windows DPAPI / Android Keystore | 不写日志、不导出；加密不可用时拒绝落盘，不降级明文 |
++| 网页登录态 | 同上（DPAPI / Keystore）加密后落盘 | 登出会删除文件；加密不可用时只保留在内存里 |
+ | 网页模式 Cookie | 独立 WebView 分区 | 只用于官网登录 |
+ | API 请求 | 你的设备 → 你填的地址 | 没有中转 |
+ 
+diff --git "a/C:\\Users\\elyoncat\\AppData\\Local\\Temp\\dsh-LSWQQk\\empty-for-diff.txt" "b/electron\\secure-store.ts"
+index e69de29..014b9a4 100644
+--- "a/C:\\Users\\elyoncat\\AppData\\Local\\Temp\\dsh-LSWQQk\\empty-for-diff.txt"
++++ "b/electron\\secure-store.ts"
+@@ -0,0 +1,161 @@
++/**
++ * Electron 安全存储的纯逻辑层。
++ *
++ * 从 main.ts 抽出来的原因：main.ts 直接 `import { safeStorage } from 'electron'`，
++ * 在 node 单测里根本 import 不进来；而「加密不可用时拒绝落盘」「解密失败不破坏
++ * 原密文」「旧版 raw: 明文读到就升级」这三条规则必须能被自动化测试守住。
++ *
++ * 这里不 import electron：调用方把 `safeStorage` 的能力按 `SafeStorageLike`
++ * 注入进来，测试传一个假的即可。
++ */
++import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
++import { dirname } from 'node:path'
++
++export type SecureStorageStatus = 'available' | 'unavailable' | 'read-error'
++
++/** safeStorage 里我们真正用到的那三个方法。 */
++export interface SafeStorageLike {
++  isEncryptionAvailable: () => boolean
++  encryptString: (plainText: string) => Buffer
++  decryptString: (encrypted: Buffer) => string
++}
++
++/** 这台机器上没有可用的系统密钥存储（safeStorage 后端缺失）。 */
++export class SecureStoreUnavailableError extends Error {
++  constructor(message: string) {
++    super(message)
++    this.name = 'SecureStoreUnavailableError'
++  }
++}
++
++export interface SecureReadResult {
++  value: string | null
++  status: SecureStorageStatus
++  /** 读到的是旧版 `raw:` 明文，调用方应尽快用 encryptValue 覆盖写回。 */
++  needsMigration: boolean
++}
++
++/** 凭证文件里我们用到的槽位名。 */
++export const API_KEY_SLOT = 'apiKey'
++
++const ENC_PREFIX = 'enc:'
++const RAW_PREFIX = 'raw:'
++
++/**
++ * 加密一个值。
++ *
++ * 加密不可用时**抛错**，绝不降级成 Base64 明文 —— 那只是把「随手 cat 就拿到」
++ * 换成「随手 base64 -d 就拿到」，等于没加密。抛错还保证调用方在写盘之前就失败，
++ * 原有密文不会被这次写入覆盖。
++ */
++export function encryptValue(safe: SafeStorageLike, value: string): string {
++  if (!safe.isEncryptionAvailable()) {
++    throw new SecureStoreUnavailableError(
++      '这台机器上没有可用的系统密钥存储（DPAPI / Keychain），为避免明文落盘，凭证没有保存',
++    )
++  }
++  return `${ENC_PREFIX}${safe.encryptString(value).toString('base64')}`
++}
++
++/**
++ * 解密一个存储值。
++ *
++ * 只做「能不能解出来」的判断，**不负责删除或改写**：解不开时返回 read-error，
++ * 让上层提示用户，原密文原封不动地留在盘上（可能只是密钥暂时不可用）。
++ */
++export function decryptValue(
++  safe: SafeStorageLike,
++  stored: string,
++): { value: string | null; status: SecureStorageStatus } {
++  if (stored.startsWith(ENC_PREFIX)) {
++    try {
++      return { value: safe.decryptString(Buffer.from(stored.slice(ENC_PREFIX.length), 'base64')), status: 'available' }
++    } catch {
++      return { value: null, status: 'read-error' }
++    }
++  }
++  // 旧版降级路径写下的 Base64「明文」：只为迁移而兼容读取。
++  if (stored.startsWith(RAW_PREFIX)) {
++    try {
++      return { value: Buffer.from(stored.slice(RAW_PREFIX.length), 'base64').toString('utf8'), status: 'available' }
++    } catch {
++      return { value: null, status: 'read-error' }
++    }
++  }
++  // 认不出的格式：不能当成「没配置」，否则会被一个空 blob 覆盖掉。
++  return { value: null, status: 'read-error' }
++}
++
++/** 读凭证槽位，并把「没有存档」和「读失败」区分开。 */
++export function readSecureEntry(safe: SafeStorageLike, store: Record<string, string>): SecureReadResult {
++  const stored = store[API_KEY_SLOT]
++  if (stored === undefined) {
++    // 确实没有存档：能不能写入取决于加密后端在不在。
++    return {
++      value: null,
++      status: safe.isEncryptionAvailable() ? 'available' : 'unavailable',
++      needsMigration: false,
++    }
++  }
++  const decoded = decryptValue(safe, stored)
++  return {
++    ...decoded,
++    needsMigration: decoded.status === 'available' && stored.startsWith(RAW_PREFIX),
++  }
++}
++
++/** 读凭证文件；不存在或格式坏了都当空表（不是「凭证丢了」）。 */
++export function readSecureStoreFile(file: string): Record<string, string> {
++  if (!existsSync(file)) return {}
++  try {
++    const parsed = JSON.parse(readFileSync(file, 'utf8')) as unknown
++    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {}
++    return parsed as Record<string, string>
++  } catch {
++    return {}
++  }
++}
++
++export function writeSecureStoreFile(file: string, store: Record<string, string>): void {
++  mkdirSync(dirname(file), { recursive: true })
++  writeFileSync(file, JSON.stringify(store), 'utf8')
++}
++
++/**
++ * 读凭证（含旧版 `raw:` 明文的一次性升级）。
++ *
++ * 这是 `secure:get` 的完整实现，测试直接打这里 —— 避免测试里再抄一份
++ * 「先加密再写」的顺序，抄的那份永远不会发现顺序被改错。
++ */
++export function readSecureValue(safe: SafeStorageLike, file: string): SecureReadResult {
++  const store = readSecureStoreFile(file)
++  const result = readSecureEntry(safe, store)
++  if (result.needsMigration && result.value !== null) {
++    try {
++      store[API_KEY_SLOT] = encryptValue(safe, result.value)
++      writeSecureStoreFile(file, store)
++    } catch {
++      /* 升级失败：本次仍在内存里可用，下次启动再试 */
++    }
++  }
++  return result
++}
++
++/**
++ * 写凭证。
++ *
++ * **加密在写盘之前**：加密不可用时 `encryptValue` 直接抛错，函数在 `writeSecureStoreFile`
++ * 之前就退出，所以原文件一个字节都不会变（这是「失败不得清空原凭证」的实现基础）。
++ */
++export function writeSecureValue(safe: SafeStorageLike, file: string, value: string): void {
++  const store = readSecureStoreFile(file)
++  store[API_KEY_SLOT] = encryptValue(safe, value)
++  writeSecureStoreFile(file, store)
++}
++
++/** 删除凭证。 */
++export function removeSecureValue(file: string): void {
++  const store = readSecureStoreFile(file)
++  delete store[API_KEY_SLOT]
++  writeSecureStoreFile(file, store)
++}
+diff --git "a/C:\\Users\\elyoncat\\AppData\\Local\\Temp\\dsh-LSWQQk\\empty-for-diff.txt" "b/electron\\app-protocol-path.ts"
+index e69de29..4091a7a 100644
+--- "a/C:\\Users\\elyoncat\\AppData\\Local\\Temp\\dsh-LSWQQk\\empty-for-diff.txt"
++++ "b/electron\\app-protocol-path.ts"
+@@ -0,0 +1,55 @@
++/**
++ * `app://` 协议路径解析（纯函数）。
++ *
++ * 从 main.ts 抽出来是为了能单测：这里守的是「任何编码形式都不能越出 dist 目录」，
++ * 而这种防线一旦退化就等于没有 —— 必须每条变体都有回归测试。
++ */
++import { isAbsolute, join, normalize, relative, sep } from 'node:path'
++
++export const APP_PROTOCOL_HOST = 'deepsea'
++
++export type AppPathResolution =
++  | { ok: true; target: string }
++  | { ok: false; reason: 'malformed' | 'host' | 'decode' | 'escape' }
++
++/**
++ * 把 `app://deepsea/...` 映射到磁盘路径。
++ *
++ * 关键点（顺序不能变）：
++ *   1. 先 URL 解析 —— 解析器会折叠字面的 `..` 和 `%2e%2e`；
++ *   2. 再 decodeURIComponent —— 这一步之后才可能出现真实 `..`
++ *      （`%2e%2e%2f` 里的 `..` 在解析阶段不是一个完整 segment，所以不会被折叠）；
++ *   3. 最后用 `relative()` 判断包含关系 —— **不能用 `startsWith`**，那只是字符串
++ *      前缀，`dist-other` 能通过对 `dist` 的判断。
++ */
++export function resolveAppPath(root: string, requestUrl: string): AppPathResolution {
++  let url: URL
++  try {
++    url = new URL(requestUrl)
++  } catch {
++    return { ok: false, reason: 'malformed' }
++  }
++  if (url.protocol !== 'app:') return { ok: false, reason: 'host' }
++  if (url.hostname !== APP_PROTOCOL_HOST) return { ok: false, reason: 'host' }
++
++  let pathname: string
++  try {
++    pathname = decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname)
++  } catch {
++    // 孤立的 `%` 会抛 URIError。放过去会让整个请求静默失败，这里明确拒绝。
++    return { ok: false, reason: 'decode' }
++  }
++
++  let target = normalize(join(root, pathname))
++  // `join` 会把尾斜杠保留下来（`.../assets/`）。返回规范路径，避免调用方拿它
++  // 做字符串比较时多出一个分隔符。
++  if (target.length > root.length && target.endsWith(sep)) target = target.slice(0, -1)
++
++  const rel = relative(root, target)
++  // rel === '' 表示 target 就是 root 本身（不是文件）；
++  // '..' / '../x' 表示越界；isAbsolute(rel) 覆盖跨盘符的情况。
++  if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
++    return { ok: false, reason: 'escape' }
++  }
++  return { ok: true, target }
++}
+diff --git "a/C:\\Users\\elyoncat\\AppData\\Local\\Temp\\dsh-LSWQQk\\empty-for-diff.txt" "b/electron\\trust.ts"
+index e69de29..280cb35 100644
+--- "a/C:\\Users\\elyoncat\\AppData\\Local\\Temp\\dsh-LSWQQk\\empty-for-diff.txt"
++++ "b/electron\\trust.ts"
+@@ -0,0 +1,28 @@
++/**
++ * IPC / 导航的信任判断（纯函数）。
++ *
++ * 拆成两个函数是刻意的：以前导航白名单和 IPC 来源校验共用一个函数，里面无条件
++ * 放行 `about:blank` / `about:srcdoc`，于是「主窗口不许导航走」这条保护被自己
++ * 开了个口子。现在导航和 IPC 各用各的，`about:*` 一律不认。
++ */
++
++/** 我们自己的页面。 */
++export function isTrustedIpcSenderUrl(raw: string, devUrl?: string): boolean {
++  try {
++    const url = new URL(raw)
++    if (url.protocol === 'app:') return url.hostname === 'deepsea'
++    if (devUrl !== undefined && devUrl !== '') return url.origin === new URL(devUrl).origin
++    return false
++  } catch {
++    return false
++  }
++}
++
++/**
++ * 主窗口允许停留在哪个地址。
++ *
++ * 与 IPC 判断同源，但**独立存在**：将来要给导航加例外时，不会顺手放宽 IPC。
++ */
++export function isAllowedMainWindowNavigation(raw: string, devUrl?: string): boolean {
++  return isTrustedIpcSenderUrl(raw, devUrl)
++}
+diff --git "a/C:\\Users\\elyoncat\\AppData\\Local\\Temp\\dsh-LSWQQk\\empty-for-diff.txt" "b/src\\lib\\secure-types.ts"
+index e69de29..607c48f 100644
+--- "a/C:\\Users\\elyoncat\\AppData\\Local\\Temp\\dsh-LSWQQk\\empty-for-diff.txt"
++++ "b/src\\lib\\secure-types.ts"
+@@ -0,0 +1,28 @@
++/**
++ * 安全存储的状态契约。
++ *
++ * 为什么单独抽一个文件：这个三态值同时被 platform（读）、settings（判断能不能写）、
++ * store（提示用户）和测试用到，散在各处就会出现「一边认为是没配置、一边认为是读失败」
++ * 的分歧 —— 而那正好是最危险的一类分歧（会把用户已有的 Key 覆盖掉）。
++ */
++
++/**
++ * - `available`：安全存储正常可用，读取成功（包括「确实没有存过 Key」）。
++ * - `unavailable`：平台明确报告安全存储不可用（例如 Electron 的 safeStorage 后端缺失、
++ *   Capacitor 插件没注册）。此时**不可能**安全写入。
++ * - `read-error`：读取过程发生异常，**无法确认**原有凭证状态。此时必须假定「可能有一份
++ *   还能恢复的密文」，任何写/删都可能把它毁掉。
++ */
++export type SecureStorageStatus = 'available' | 'unavailable' | 'read-error'
++
++/**
++ * read-error 时给用户看的原文。
++ *
++ * 注意措辞里刻意写成「Key」而不是「API Key」：Chat 的 notice 栏对包含 `API Key`
++ * 的文案会追加一个「去填 Key」的链接（Chat.tsx:1278），那正好是「触发重新输入 Key
++ * 的流程」，与本状态的要求相反。
++ */
++export const SECURE_READ_ERROR_MESSAGE = '安全存储读取失败，请勿重新输入Key，建议重启应用'
++
++/** 安全存储不可用（写入被拒）时给用户看的原文。 */
++export const SECURE_UNAVAILABLE_MESSAGE = '系统安全存储不可用，无法安全保存 API Key'
+diff --git "a/C:\\Users\\elyoncat\\AppData\\Local\\Temp\\dsh-LSWQQk\\empty-for-diff.txt" "b/src\\lib\\android-secure.ts"
+index e69de29..b1a1859 100644
+--- "a/C:\\Users\\elyoncat\\AppData\\Local\\Temp\\dsh-LSWQQk\\empty-for-diff.txt"
++++ "b/src\\lib\\android-secure.ts"
+@@ -0,0 +1,107 @@
++/**
++ * Android 安全存储（Keystore 插件 + 旧版 localStorage 明文迁移）的纯逻辑层。
++ *
++ * 从 platform.ts 抽出来的原因：platform.ts 直接依赖 Capacitor 的运行时
++ * （`bridge()` / `Capacitor.getPlatform()`），在 node 单测里没法真实驱动；
++ * 而「失败时不许降级写明文」「迁移失败要保留旧值」「读失败不许伪装成没配置」
++ * 这三条规则必须能被自动化测试守住。
++ *
++ * platform.ts 只负责把真实依赖注入进来，判断逻辑全在这里。
++ */
++import type { SecureStorageStatus } from './secure-types'
++
++/** 安全存储写入被拒。调用方必须提示用户，绝不能退回明文存储。 */
++export class SecureStorageError extends Error {
++  constructor(message: string) {
++    super(message)
++    this.name = 'SecureStorageError'
++  }
++}
++
++export interface AndroidSecureDeps {
++  /** 读 Keystore 插件。插件正常但没有值时应 resolve(null)。 */
++  pluginGet: () => Promise<string | null>
++  pluginSet: (value: string) => Promise<void>
++  pluginRemove: () => Promise<void>
++  /** 旧版降级路径留下的明文（localStorage）。没有返回 null。 */
++  legacyGet: () => string | null
++  legacyRemove: () => void
++}
++
++export interface AndroidSecureReadResult {
++  value: string | null
++  status: SecureStorageStatus
++}
++
++/**
++ * 把插件异常归类。
++ *
++ * 「插件没注册 / 没实现」是**确定的不可用**；其它异常（Keystore 被锁、密钥暂时失效、
++ * 解密失败）只能说明「这次读不出来」，不能断言凭证不存在。
++ */
++export function classifyPluginError(error: unknown): SecureStorageStatus {
++  const message = error instanceof Error ? error.message : String(error)
++  return /not implemented|not available|not registered|no such plugin/i.test(message)
++    ? 'unavailable'
++    : 'read-error'
++}
++
++/**
++ * 读取凭证。
++ *
++ * 顺序：插件 → 旧版明文迁移。任何一步失败都**不会**返回「就是没配置」这个结论，
++ * 除非插件明确正常且旧版也没有残留。
++ */
++export async function androidSecureGet(deps: AndroidSecureDeps): Promise<AndroidSecureReadResult> {
++  let pluginStatus: SecureStorageStatus | null = null
++  try {
++    const value = await deps.pluginGet()
++    if (typeof value === 'string' && value !== '') return { value, status: 'available' }
++  } catch (error) {
++    pluginStatus = classifyPluginError(error)
++  }
++
++  // 插件里没有值（或读失败）：看看旧版降级路径有没有留下明文。
++  const legacy = deps.legacyGet()
++  if (legacy === null || legacy === '') {
++    // 没有任何旧值可救。插件读失败时如实报告失败，不谎称「尚未配置」。
++    return { value: null, status: pluginStatus ?? 'available' }
++  }
++
++  // 有旧值：尝试搬进 Keystore。
++  try {
++    await deps.pluginSet(legacy)
++  } catch {
++    // 迁移失败：**保留旧值**（不删），否则用户唯一一份凭证就没了。
++    // 状态报 unavailable —— 值能用，但后续写入一定失败，上层据此提示。
++    return { value: legacy, status: 'unavailable' }
++  }
++  // 只有搬成功了才允许删旧值。
++  deps.legacyRemove()
++  return { value: legacy, status: 'available' }
++}
++
++/**
++ * 写入凭证。
++ *
++ * 失败直接抛错 —— 绝不退回 localStorage 明文。调用方（store）会把
++ * SecureStorageError 变成用户可见的提示。
++ */
++export async function androidSecureSet(deps: AndroidSecureDeps, value: string): Promise<void> {
++  try {
++    await deps.pluginSet(value)
++  } catch (error) {
++    const detail = error instanceof Error ? error.message : String(error)
++    throw new SecureStorageError(`系统安全存储不可用（${detail}）`)
++  }
++}
++
++/** 删除凭证。插件删不掉只是残留，不该挡住登出流程。 */
++export async function androidSecureRemove(deps: AndroidSecureDeps): Promise<void> {
++  deps.legacyRemove()
++  try {
++    await deps.pluginRemove()
++  } catch {
++    /* 残留不等于明文泄漏，这里不阻塞 */
++  }
++}
+diff --git "a/C:\\Users\\elyoncat\\AppData\\Local\\Temp\\dsh-LSWQQk\\empty-for-diff.txt" "b/src\\lib\\secure-credentials.ts"
+index e69de29..1d4bfb5 100644
+--- "a/C:\\Users\\elyoncat\\AppData\\Local\\Temp\\dsh-LSWQQk\\empty-for-diff.txt"
++++ "b/src\\lib\\secure-credentials.ts"
+@@ -0,0 +1,126 @@
++/**
++ * 凭证 blob 的读/写闸门。
++ *
++ * 为什么需要这一层：安全存储只有「一个槽位」（一串 JSON），而它同时承载
++ * 「用户改主题」「用户改 Key」两种完全不同的写入意图。如果只按「blob 变了就写」
++ * 判断，那么**读失败**时会得到一个空 blob，于是「改个主题」就会顺手把用户原有
++ * 的凭证删掉 —— 这正是本状态机要堵的洞。
++ *
++ * 规则（对应 read-error 的四条禁令）：
++ *   1. 读失败时绝不写、绝不删、绝不迁移；
++ *   2. 读失败 + 本次 blob 为空（只改了普通设置）→ 静默跳过；
++ *   3. 读失败 + 本次 blob 非空（用户想写新 Key）→ 明确报错，不覆盖；
++ *   4. 任何失败路径都不改动 knownBlob，下次启动仍按「未知」处理。
++ */
++import { SecureStorageError } from './android-secure'
++import {
++  SECURE_READ_ERROR_MESSAGE,
++  SECURE_UNAVAILABLE_MESSAGE,
++  type SecureStorageStatus,
++} from './secure-types'
++import { secureRead, secureRemove, secureSet } from './platform'
++
++/** 空凭证集合的序列化形式。`''` 与 `'{}'` 视为同一种「没有 Key」。 */
++const EMPTY_BLOB = '{}'
++
++export type PersistOutcome = 'written' | 'removed' | 'skipped'
++
++export interface SecureBackend {
++  read: () => Promise<{ value: string | null; status: SecureStorageStatus }>
++  write: (value: string) => Promise<void>
++  remove: () => Promise<void>
++}
++
++export interface CredentialVault {
++  getStatus: () => SecureStorageStatus
++  /** 读回原始 blob；没有就是 `''`。读失败时返回 `''` 但状态为 read-error。 */
++  load: () => Promise<string>
++  /** 写回 blob。read-error 下永不触碰原密文。 */
++  persist: (blob: string) => Promise<PersistOutcome>
++}
++
++/** 把 `null` / `''` 归一成空 blob，避免「空 vs 空」被判成变更。 */
++function normalize(blob: string | null): string {
++  return blob === null || blob === '' ? EMPTY_BLOB : blob
++}
++
++export function createCredentialVault(backend: SecureBackend): CredentialVault {
++  let status: SecureStorageStatus = 'available'
++  /** 已知的盘上内容；`null` 表示「不知道」（读失败/不可用）。 */
++  let knownBlob: string | null = null
++
++  return {
++    getStatus: () => status,
++
++    async load(): Promise<string> {
++      const result = await backend.read()
++      status = result.status
++      if (status !== 'available') {
++        // 读失败或不可用：我们不知道盘上是什么，绝不把它记成「空」。
++        knownBlob = null
++        return ''
++      }
++      const blob = normalize(result.value)
++      knownBlob = blob
++      return result.value ?? ''
++    },
++
++    async persist(blob: string): Promise<PersistOutcome> {
++      const next = normalize(blob)
++      const empty = next === EMPTY_BLOB
++
++      if (status === 'read-error') {
++        // 无法确认原凭证状态。空的写入说明只是改了普通设置 → 静默跳过；
++        // 非空说明用户想写新 Key → 拒绝并让上层提示，绝不覆盖可能还能恢复的密文。
++        if (empty) return 'skipped'
++        throw new SecureStorageError(SECURE_READ_ERROR_MESSAGE)
++      }
++
++      if (status === 'unavailable') {
++        // 不可用时写一定失败。空写入无需删除（也没有能安全删除的东西）。
++        if (empty) return 'skipped'
++        throw new SecureStorageError(SECURE_UNAVAILABLE_MESSAGE)
++      }
++
++      if (knownBlob !== null && next === knownBlob) return 'skipped'
++
++      if (empty) {
++        await backend.remove()
++        knownBlob = next
++        return 'removed'
++      }
++      await backend.write(blob)
++      knownBlob = next
++      return 'written'
++    },
++  }
++}
++
++/** 生产环境的后端：直接走 platform 的真实安全存储。 */
++export const platformSecureBackend: SecureBackend = {
++  read: () => secureRead(),
++  write: (value) => secureSet(value),
++  remove: () => secureRemove(),
++}
++
++let vault: CredentialVault = createCredentialVault(platformSecureBackend)
++
++/** settings 每次操作都取当前 vault（测试会替换它）。 */
++export function getCredentialVault(): CredentialVault {
++  return vault
++}
++
++/**
++ * 仅供测试注入后端。
++ *
++ * 名字带下划线是刻意的：生产代码不应调用它。真正需要换后端的地方只有
++ * 单测（node 里没有 Electron / Capacitor / localStorage）。
++ */
++export function __setCredentialVaultForTest(next: CredentialVault): void {
++  vault = next
++}
++
++/** 测试用：恢复成生产后端。 */
++export function __resetCredentialVaultForTest(): void {
++  vault = createCredentialVault(platformSecureBackend)
++}
+diff --git "a/C:\\Users\\elyoncat\\AppData\\Local\\Temp\\dsh-LSWQQk\\empty-for-diff.txt" "b/test\\secure-storage-electron.test.ts"
+index e69de29..eaa9c2f 100644
+--- "a/C:\\Users\\elyoncat\\AppData\\Local\\Temp\\dsh-LSWQQk\\empty-for-diff.txt"
++++ "b/test\\secure-storage-electron.test.ts"
+@@ -0,0 +1,181 @@
++import test from 'node:test'
++import assert from 'node:assert/strict'
++import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++
++import {
++  API_KEY_SLOT,
++  SecureStoreUnavailableError,
++  encryptValue,
++  readSecureEntry,
++  readSecureValue,
++  writeSecureValue,
++  type SafeStorageLike,
++} from '../electron/secure-store.ts'
++
++/**
++ * Electron 安全存储（任务 2A）。
++ *
++ * 直接测 `electron/secure-store.ts` —— 那是 `secure:get` / `secure:set` 的完整实现，
++ * main.ts 只是把真实的 safeStorage 和文件路径注入进去。这样测的是**真代码**，
++ * 不是测试里另抄一份「先加密再写」的顺序（抄的那份永远不会发现顺序被改错）。
++ *
++ * 注意：这里是**模拟测试**，不是真机验证。`safeStorage` 用假的实现替换，
++ * 真实 DPAPI 行为见 docs/BATCH1-MANUAL-TEST-PLAN.md。
++ */
++
++/** 假的 safeStorage：加密方式可辨认（SEALED(...)），便于断言文件里没有明文。 */
++function fakeSafe(options: { available?: boolean } = {}): SafeStorageLike {
++  const available = options.available ?? true
++  return {
++    isEncryptionAvailable: () => available,
++    encryptString: (plain: string) => Buffer.from(`SEALED(${plain})`, 'utf8'),
++    decryptString: (encrypted: Buffer) => {
++      const text = encrypted.toString('utf8')
++      const match = /^SEALED\(([\s\S]*)\)$/.exec(text)
++      if (match === null) throw new Error('decrypt failed: not a sealed value')
++      return match[1]
++    },
++  }
++}
++
++function tempSecureFile(): { file: string; cleanup: () => void } {
++  const dir = mkdtempSync(join(tmpdir(), 'deepsea-secure-'))
++  return { file: join(dir, 'secure.json'), cleanup: () => rmSync(dir, { recursive: true, force: true }) }
++}
++
++const SECRET = 'sk-test-secret-0123456789'
++
++test('A1 加密不可用：写入必须抛明确异常', () => {
++  const { file, cleanup } = tempSecureFile()
++  try {
++    assert.throws(
++      () => writeSecureValue(fakeSafe({ available: false }), file, SECRET),
++      SecureStoreUnavailableError,
++      '加密不可用时必须抛 SecureStoreUnavailableError，而不是静默降级',
++    )
++  } finally {
++    cleanup()
++  }
++})
++
++test('A2 加密不可用：不得创建任何凭证文件（连 Base64 明文也不行）', () => {
++  const { file, cleanup } = tempSecureFile()
++  try {
++    assert.throws(() => writeSecureValue(fakeSafe({ available: false }), file, SECRET))
++    assert.equal(existsSync(file), false, '加密不可用时不应该产生 secure.json')
++  } finally {
++    cleanup()
++  }
++})
++
++test('A3 加密不可用：原有密文不得被清空或覆盖', () => {
++  const { file, cleanup } = tempSecureFile()
++  try {
++    writeSecureValue(fakeSafe(), file, 'sk-original-value')
++    const before = readFileSync(file, 'utf8')
++    assert.notEqual(before, '', '前置条件：文件里已有密文')
++
++    assert.throws(() => writeSecureValue(fakeSafe({ available: false }), file, 'sk-new-value'))
++
++    assert.equal(readFileSync(file, 'utf8'), before, '失败的写入不能改动原文件一个字节')
++    const stillReadable = readSecureValue(fakeSafe(), file)
++    assert.equal(stillReadable.value, 'sk-original-value', '原凭证必须仍可读回')
++  } finally {
++    cleanup()
++  }
++})
++
++test('A4 加密可用：文件里只有密文，不含明文也不含 Base64 明文', () => {
++  const { file, cleanup } = tempSecureFile()
++  try {
++    writeSecureValue(fakeSafe(), file, SECRET)
++    const raw = readFileSync(file, 'utf8')
++    assert.equal(raw.includes(SECRET), false, '文件里不能出现明文 Key')
++    assert.equal(
++      raw.includes(Buffer.from(SECRET, 'utf8').toString('base64')),
++      false,
++      '文件里不能出现 Base64 编码的 Key（Base64 不是加密）',
++    )
++    assert.match(raw, /enc:/, '必须是 enc: 前缀的密文')
++    assert.equal(raw.includes('raw:'), false, '不得写入 raw: 明文降级格式')
++  } finally {
++    cleanup()
++  }
++})
++
++test('A5 加密可用：正常读写不回归', () => {
++  const { file, cleanup } = tempSecureFile()
++  try {
++    const safe = fakeSafe()
++    writeSecureValue(safe, file, SECRET)
++    const result = readSecureValue(safe, file)
++    assert.equal(result.value, SECRET)
++    assert.equal(result.status, 'available')
++    assert.equal(result.needsMigration, false)
++  } finally {
++    cleanup()
++  }
++})
++
++test('A6 旧版 raw: 明文：读到能读出，并就地升级成 enc:（不失效老用户）', () => {
++  const { file, cleanup } = tempSecureFile()
++  try {
++    const legacy = `raw:${Buffer.from('sk-legacy-plain', 'utf8').toString('base64')}`
++    writeFileSync(file, JSON.stringify({ [API_KEY_SLOT]: legacy }), 'utf8')
++
++    const result = readSecureValue(fakeSafe(), file)
++    assert.equal(result.value, 'sk-legacy-plain', '旧格式必须仍能读出来')
++    assert.equal(result.status, 'available')
++    assert.equal(result.needsMigration, true)
++
++    const after = readFileSync(file, 'utf8')
++    assert.equal(after.includes('raw:'), false, '迁移后不应再留 raw: 明文')
++    assert.match(after, /enc:/, '迁移后应是密文')
++  } finally {
++    cleanup()
++  }
++})
++
++test('A7 解密失败：状态 read-error，且原文件一个字节都不变', () => {
++  const { file, cleanup } = tempSecureFile()
++  try {
++    writeSecureValue(fakeSafe(), file, 'sk-keep-me')
++    const before = readFileSync(file, 'utf8')
++
++    const broken: SafeStorageLike = {
++      isEncryptionAvailable: () => true,
++      encryptString: (plain: string) => Buffer.from(`SEALED(${plain})`, 'utf8'),
++      decryptString: () => {
++        throw new Error('key unavailable')
++      },
++    }
++    const result = readSecureValue(broken, file)
++
++    assert.equal(result.value, null)
++    assert.equal(result.status, 'read-error', '解密失败必须报 read-error，不能报 available')
++    assert.equal(readFileSync(file, 'utf8'), before, '读失败绝不能改动密文')
++  } finally {
++    cleanup()
++  }
++})
++
++test('A8 「没有存档」与「读失败」必须能区分', () => {
++  const safe = fakeSafe()
++  const none = readSecureEntry(safe, {})
++  assert.equal(none.value, null)
++  assert.equal(none.status, 'available', '确实没配过 Key 时是 available')
++
++  const unavailable = readSecureEntry(fakeSafe({ available: false }), {})
++  assert.equal(unavailable.value, null)
++  assert.equal(unavailable.status, 'unavailable', '加密后端缺失是 unavailable，不是「没配置」')
++
++  const corrupt = readSecureEntry(safe, { [API_KEY_SLOT]: 'not-a-known-format' })
++  assert.equal(corrupt.value, null)
++  assert.equal(corrupt.status, 'read-error', '认不出的格式必须报 read-error，不能当成没配置')
++})
++
++test('A9 加密不可用时 encryptValue 直接抛错（写盘前的唯一闸门）', () => {
++  assert.throws(() => encryptValue(fakeSafe({ available: false }), SECRET), SecureStoreUnavailableError)
++})
+diff --git "a/C:\\Users\\elyoncat\\AppData\\Local\\Temp\\dsh-LSWQQk\\empty-for-diff.txt" "b/test\\android-secure.test.ts"
+index e69de29..4312a51 100644
+--- "a/C:\\Users\\elyoncat\\AppData\\Local\\Temp\\dsh-LSWQQk\\empty-for-diff.txt"
++++ "b/test\\android-secure.test.ts"
+@@ -0,0 +1,190 @@
++import test from 'node:test'
++import assert from 'node:assert/strict'
++import { registerHooks } from 'node:module'
++import fs from 'node:fs'
++import path from 'node:path'
++import { fileURLToPath } from 'node:url'
++
++/**
++ * Android Keystore 安全存储（任务 2B）。
++ *
++ * android-secure.ts 内部是 bundler 风格的无扩展名 import，node 的 ESM 解析器不认，
++ * 所以先装一个 resolve 钩子（与 test/settings-migration.test.ts 同一套办法），
++ * 再动态 import —— 这样测的是真正的判断逻辑，而不是测试里另抄一份。
++ */
++
++registerHooks({
++  resolve(specifier, context, nextResolve) {
++    try {
++      return nextResolve(specifier, context)
++    } catch (error) {
++      if (specifier.startsWith('.') && !/\.[cm]?[jt]s$/.test(specifier)) {
++        return nextResolve(`${specifier}.ts`, context)
++      }
++      throw error
++    }
++  },
++})
++
++const {
++  SecureStorageError,
++  androidSecureGet,
++  androidSecureRemove,
++  androidSecureSet,
++  classifyPluginError,
++} = await import('../src/lib/android-secure.ts')
++const { SECURE_READ_ERROR_MESSAGE } = await import('../src/lib/secure-types.ts')
++
++const here = path.dirname(fileURLToPath(import.meta.url))
++const root = path.resolve(here, '..')
++
++/** 一个可观测的假 Keystore：记录调用次数，便于断言「什么都没写」。 */
++function makeDeps(options: {
++  pluginGet?: () => Promise<string | null>
++  pluginSet?: (value: string) => Promise<void>
++  pluginRemove?: () => Promise<void>
++  legacy?: string | null
++} = {}) {
++  const state = {
++    setCalls: [] as string[],
++    removeCalls: 0,
++    legacyValue: options.legacy ?? null,
++    legacyRemoveCalls: 0,
++  }
++  const deps = {
++    pluginGet: options.pluginGet ?? (async () => null),
++    pluginSet:
++      options.pluginSet ??
++      (async (value: string) => {
++        state.setCalls.push(value)
++      }),
++    pluginRemove:
++      options.pluginRemove ??
++      (async () => {
++        state.removeCalls += 1
++      }),
++    legacyGet: () => state.legacyValue,
++    legacyRemove: () => {
++      state.legacyRemoveCalls += 1
++      state.legacyValue = null
++    },
++  }
++  return { deps, state }
++}
++
++test('B1 插件写入失败：必须抛 SecureStorageError', async () => {
++  const { deps } = makeDeps({
++    pluginSet: async () => {
++      throw new Error('keystore locked')
++    },
++  })
++  await assert.rejects(() => androidSecureSet(deps, 'sk-new'), SecureStorageError)
++})
++
++test('B2 写入失败时不得降级写 localStorage（依赖里根本没有写明文的通道）', () => {
++  // 类型层面就堵死了：AndroidSecureDeps 只有 legacyGet / legacyRemove，没有 legacySet。
++  // 这里再加一条源码断言，防止将来有人偷偷加回来。断言前先剥注释 ——
++  // 注释里为了解释历史会提到 localStorage，那不是代码。
++  const source = fs
++    .readFileSync(path.join(root, 'src/lib/android-secure.ts'), 'utf8')
++    .replace(/\/\*[\s\S]*?\*\//g, '')
++    .split('\n')
++    .map((line) => line.replace(/(^|[^:])\/\/.*$/, '$1'))
++    .join('\n')
++  assert.equal(/localStorage/.test(source), false, 'android-secure.ts 的代码里不应出现 localStorage')
++  assert.equal(/legacySet/.test(source), false, '迁移只读不写：不得有 legacySet')
++})
++
++test('B3 旧 localStorage 明文迁移失败：必须保留旧值', async () => {
++  const { deps, state } = makeDeps({
++    legacy: 'sk-legacy-plain',
++    pluginSet: async () => {
++      throw new Error('keystore unavailable')
++    },
++  })
++  const result = await androidSecureGet(deps)
++
++  assert.equal(result.value, 'sk-legacy-plain', '迁移失败时旧值必须仍能读到')
++  assert.equal(state.legacyValue, 'sk-legacy-plain', '迁移失败绝不能删掉旧明文')
++  assert.equal(state.legacyRemoveCalls, 0, '迁移失败不得调用 legacyRemove')
++  assert.equal(result.status, 'unavailable', '值能用但写入一定失败 → unavailable')
++})
++
++test('B4 迁移成功后才允许删除旧 localStorage 值', async () => {
++  const { deps, state } = makeDeps({ legacy: 'sk-legacy-plain' })
++  const result = await androidSecureGet(deps)
++
++  assert.deepEqual(state.setCalls, ['sk-legacy-plain'], '必须先把旧值搬进 Keystore')
++  assert.equal(result.value, 'sk-legacy-plain')
++  assert.equal(result.status, 'available')
++  assert.equal(state.legacyRemoveCalls, 1, '迁移成功后才删旧值')
++  assert.equal(state.legacyValue, null, '迁移成功后旧明文应被清掉')
++})
++
++test('B5 读取失败不得伪装成「尚未配置 Key」', async () => {
++  const { deps } = makeDeps({
++    pluginGet: async () => {
++      throw new Error('UserNotAuthenticatedException')
++    },
++  })
++  const result = await androidSecureGet(deps)
++
++  assert.equal(result.value, null)
++  assert.equal(result.status, 'read-error', '暂时性读取失败必须报 read-error，不能报「没配置」')
++})
++
++test('B6 插件未注册 → unavailable（而不是 read-error）', async () => {
++  const { deps } = makeDeps({
++    pluginGet: async () => {
++      throw new Error('DeepSeaSecure is not implemented on android')
++    },
++  })
++  const result = await androidSecureGet(deps)
++  assert.equal(result.status, 'unavailable')
++})
++
++test('B7 插件正常成功路径：直接返回存储值', async () => {
++  const { deps, state } = makeDeps({ pluginGet: async () => 'sk-stored-in-keystore' })
++  const result = await androidSecureGet(deps)
++
++  assert.equal(result.value, 'sk-stored-in-keystore')
++  assert.equal(result.status, 'available')
++  assert.equal(state.setCalls.length, 0, '读成功时不该发生迁移写入')
++})
++
++test('B8 插件正常但没有值、也没有旧明文 → 这才是真的「没配置」', async () => {
++  const { deps } = makeDeps({ pluginGet: async () => null, legacy: null })
++  const result = await androidSecureGet(deps)
++
++  assert.equal(result.value, null)
++  assert.equal(result.status, 'available', '插件正常且无值，才可以判定为未配置')
++})
++
++test('B9 写入成功路径不回归', async () => {
++  const { deps, state } = makeDeps()
++  await androidSecureSet(deps, 'sk-brand-new')
++  assert.deepEqual(state.setCalls, ['sk-brand-new'])
++})
++
++test('B10 删除：清旧明文 + 调插件，插件失败也不阻塞', async () => {
++  const { deps, state } = makeDeps({
++    legacy: 'sk-legacy',
++    pluginRemove: async () => {
++      throw new Error('nope')
++    },
++  })
++  await androidSecureRemove(deps)
++  assert.equal(state.legacyRemoveCalls, 1)
++  assert.equal(state.legacyValue, null)
++})
++
++test('B11 插件异常分类', () => {
++  assert.equal(classifyPluginError(new Error('X is not implemented')), 'unavailable')
++  assert.equal(classifyPluginError(new Error('no such plugin')), 'unavailable')
++  assert.equal(classifyPluginError(new Error('KeystoreException')), 'read-error')
++  assert.equal(classifyPluginError('weird string'), 'read-error')
++})
++
++test('B12 用户可见文案就是需求指定的那一句', () => {
++  assert.equal(SECURE_READ_ERROR_MESSAGE, '安全存储读取失败，请勿重新输入Key，建议重启应用')
++})
+diff --git "a/C:\\Users\\elyoncat\\AppData\\Local\\Temp\\dsh-LSWQQk\\empty-for-diff.txt" "b/test\\settings-secure-status.test.ts"
+index e69de29..223b5de 100644
+--- "a/C:\\Users\\elyoncat\\AppData\\Local\\Temp\\dsh-LSWQQk\\empty-for-diff.txt"
++++ "b/test\\settings-secure-status.test.ts"
+@@ -0,0 +1,202 @@
++import test from 'node:test'
++import assert from 'node:assert/strict'
++import { registerHooks } from 'node:module'
++import fs from 'node:fs'
++import path from 'node:path'
++import { fileURLToPath } from 'node:url'
++
++/**
++ * 安全存储状态机（任务 2C）。
++ *
++ * 测的是 settings.ts 里 `loadSettings` / `persistSettings` **真正调用的那两个函数**
++ * （loadCredentialBlob / persistCredentialBlob）和它背后的 credential vault。
++ *
++ * 为什么不去直接跑 loadSettings：它会连带读 IndexedDB（node 里没有 indexedDB）。
++ * 所以这里把「凭证这一层」单独测透，并在最后用源码断言保证 settings.ts 没有绕过
++ * vault 直接写安全存储的路径 —— 绕过去就等于把这里测的规则全部作废。
++ *
++ * 这是**逻辑级/模拟测试**，不是真机验证。
++ */
++
++registerHooks({
++  resolve(specifier, context, nextResolve) {
++    try {
++      return nextResolve(specifier, context)
++    } catch (error) {
++      if (specifier.startsWith('.') && !/\.[cm]?[jt]s$/.test(specifier)) {
++        return nextResolve(`${specifier}.ts`, context)
++      }
++      throw error
++    }
++  },
++})
++
++const settings = await import('../src/lib/settings.ts')
++const credentials = await import('../src/lib/secure-credentials.ts')
++const { SECURE_READ_ERROR_MESSAGE, SECURE_UNAVAILABLE_MESSAGE } = await import('../src/lib/secure-types.ts')
++
++const here = path.dirname(fileURLToPath(import.meta.url))
++const root = path.resolve(here, '..')
++
++type Status = 'available' | 'unavailable' | 'read-error'
++
++/** 可观测的假后端；`state.value` 代表「盘上的真实内容」，用来证明它没被改动。 */
++function makeBackend(init: { value: string | null; status: Status }) {
++  const calls = { read: 0, write: [] as string[], remove: 0 }
++  const state = { value: init.value }
++  const backend = {
++    read: async (): Promise<{ value: string | null; status: Status }> => {
++      calls.read += 1
++      return { value: state.value, status: init.status }
++    },
++    write: async (value: string): Promise<void> => {
++      calls.write.push(value)
++      state.value = value
++    },
++    remove: async (): Promise<void> => {
++      calls.remove += 1
++      state.value = null
++    },
++  }
++  return { backend, calls, state }
++}
++
++/** 装一个指定后端的 vault，并返回它的可观测状态。 */
++function install(init: { value: string | null; status: Status }) {
++  const harness = makeBackend(init)
++  credentials.__setCredentialVaultForTest(credentials.createCredentialVault(harness.backend))
++  return harness
++}
++
++test.after(() => {
++  credentials.__resetCredentialVaultForTest()
++})
++
++const CIPHERTEXT = '{"provider-a":"cipher-blob"}'
++
++test('C1 安全存储正常读取：状态 available，值原样返回', async () => {
++  install({ value: CIPHERTEXT, status: 'available' })
++  const blob = await settings.loadCredentialBlob()
++
++  assert.equal(blob, CIPHERTEXT)
++  assert.equal(settings.getSecureStorageStatus(), 'available')
++})
++
++test('C2 安全存储不可用：状态 unavailable，且不得当成「没配置」去写空值', async () => {
++  const { calls, state } = install({ value: null, status: 'unavailable' })
++
++  const blob = await settings.loadCredentialBlob()
++  assert.equal(blob, '')
++  assert.equal(settings.getSecureStorageStatus(), 'unavailable')
++
++  // 只改普通设置（blob 为空）→ 静默跳过，不产生任何写/删。
++  assert.equal(await settings.persistCredentialBlob('{}'), 'skipped')
++  assert.deepEqual(calls.write, [])
++  assert.equal(calls.remove, 0)
++  assert.equal(state.value, null)
++
++  // 想写新 Key → 明确拒绝，而不是假装成功。
++  await assert.rejects(() => settings.persistCredentialBlob(CIPHERTEXT), {
++    message: SECURE_UNAVAILABLE_MESSAGE,
++  })
++  assert.deepEqual(calls.write, [], '被拒绝的写入不能真的落盘')
++})
++
++test('C3 安全存储读取异常：状态 read-error，且不谎称「没配置」', async () => {
++  install({ value: CIPHERTEXT, status: 'read-error' })
++
++  const blob = await settings.loadCredentialBlob()
++  assert.equal(blob, '')
++  assert.equal(settings.getSecureStorageStatus(), 'read-error')
++})
++
++test('C4 read-error 后保存其他设置：绝不触碰原密文', async () => {
++  const { calls, state } = install({ value: CIPHERTEXT, status: 'read-error' })
++  await settings.loadCredentialBlob()
++
++  // 「用户只是改了个主题」：凭证 blob 算出来是空集合。
++  const outcome = await settings.persistCredentialBlob('{}')
++
++  assert.equal(outcome, 'skipped', '空 blob 在 read-error 下必须静默跳过')
++  assert.deepEqual(calls.write, [], '不能写入')
++  assert.equal(calls.remove, 0, '不能删除（这就是以前会把凭证清掉的那个洞）')
++  assert.equal(state.value, CIPHERTEXT, '盘上的密文必须一个字节都不变')
++})
++
++test('C5 read-error 后重新加载：状态保持，密文仍在', async () => {
++  const { calls, state } = install({ value: CIPHERTEXT, status: 'read-error' })
++
++  await settings.loadCredentialBlob()
++  await settings.loadCredentialBlob()
++
++  assert.equal(settings.getSecureStorageStatus(), 'read-error')
++  assert.equal(calls.read, 2, '重新加载会重新尝试读')
++  assert.equal(state.value, CIPHERTEXT, '两次读取都不能改动密文')
++  assert.deepEqual(calls.write, [])
++  assert.equal(calls.remove, 0)
++})
++
++test('C6 read-error 后尝试写入新 Key：明确报错，不覆盖可能可恢复的密文', async () => {
++  const { calls, state } = install({ value: CIPHERTEXT, status: 'read-error' })
++  await settings.loadCredentialBlob()
++
++  await assert.rejects(() => settings.persistCredentialBlob('{"provider-a":"new-key"}'), {
++    message: SECURE_READ_ERROR_MESSAGE,
++  })
++
++  assert.deepEqual(calls.write, [], '拒绝的写入不能落盘')
++  assert.equal(calls.remove, 0)
++  assert.equal(state.value, CIPHERTEXT, '原密文必须完好')
++})
++
++test('C7 任何失败路径都不破坏原密文（遍历所有状态 × 空/非空 blob）', async () => {
++  const statuses: Status[] = ['unavailable', 'read-error']
++  for (const status of statuses) {
++    for (const blob of ['{}', '', '{"provider-a":"x"}']) {
++      const { calls, state } = install({ value: CIPHERTEXT, status })
++      await settings.loadCredentialBlob()
++      try {
++        await settings.persistCredentialBlob(blob)
++      } catch {
++        /* 拒绝是预期行为之一 */
++      }
++      assert.equal(state.value, CIPHERTEXT, `${status} + ${JSON.stringify(blob)}：密文被改动了`)
++      assert.equal(calls.remove, 0, `${status} + ${JSON.stringify(blob)}：不该有删除`)
++      if (blob === '{}' || blob === '') assert.deepEqual(calls.write, [], `${status} + 空 blob 不该写入`)
++    }
++  }
++})
++
++test('C8 available 路径不回归：写入 / 幂等跳过 / 清空删除', async () => {
++  const { calls } = install({ value: '', status: 'available' })
++
++  await settings.loadCredentialBlob()
++  assert.equal(await settings.persistCredentialBlob('{"a":"1"}'), 'written')
++  assert.deepEqual(calls.write, ['{"a":"1"}'])
++
++  // 同一个 blob 再存一次不该重复写（设置页每按键都会走这条路）。
++  assert.equal(await settings.persistCredentialBlob('{"a":"1"}'), 'skipped')
++  assert.equal(calls.write.length, 1)
++
++  assert.equal(await settings.persistCredentialBlob('{}'), 'removed')
++  assert.equal(calls.remove, 1)
++})
++
++test('C9 settings.ts 不得绕过 vault 直接读写安全存储（否则上面全部作废）', () => {
++  const source = fs.readFileSync(path.join(root, 'src/lib/settings.ts'), 'utf8')
++  const code = source
++    .replace(/\/\*[\s\S]*?\*\//g, '')
++    .split('\n')
++    .map((line) => line.replace(/(^|[^:])\/\/.*$/, '$1'))
++    .join('\n')
++
++  assert.equal(/secureSet\s*\(/.test(code), false, 'settings.ts 不能直接调 secureSet')
++  assert.equal(/secureRemove\s*\(/.test(code), false, 'settings.ts 不能直接调 secureRemove')
++  assert.match(code, /persistCredentialBlob\(/, 'persistSettings 必须走 vault')
++  assert.match(code, /loadCredentialBlob\(/, 'loadSettings 必须走 vault')
++})
++
++test('C10 用户可见文案与需求逐字一致', () => {
++  assert.equal(SECURE_READ_ERROR_MESSAGE, '安全存储读取失败，请勿重新输入Key，建议重启应用')
++  assert.equal(/API Key/.test(SECURE_READ_ERROR_MESSAGE), false, '文案不能含「API Key」，否则会触发「去填 Key」链接')
++})
+diff --git "a/C:\\Users\\elyoncat\\AppData\\Local\\Temp\\dsh-LSWQQk\\empty-for-diff.txt" "b/test\\app-protocol-path.test.ts"
+index e69de29..92421a7 100644
+--- "a/C:\\Users\\elyoncat\\AppData\\Local\\Temp\\dsh-LSWQQk\\empty-for-diff.txt"
++++ "b/test\\app-protocol-path.test.ts"
+@@ -0,0 +1,133 @@
++import test from 'node:test'
++import assert from 'node:assert/strict'
++import fs from 'node:fs'
++import path from 'node:path'
++import { fileURLToPath } from 'node:url'
++import { tmpdir } from 'node:os'
++
++import { resolveAppPath } from '../electron/app-protocol-path.ts'
++
++/**
++ * `app://` 协议路径校验（任务 3A）。
++ *
++ * 这一层守的是「任何编码形式都不能越出 dist 目录」。测试直接打 resolveAppPath ——
++ * 它是 registerAppProtocol 的全部判断逻辑，main.ts 只负责把结果变成 HTTP 响应。
++ *
++ * 注意：这是**纯函数逻辑测试**。`%2f` 是否原样到达 Electron 的 protocol.handle
++ * 属于 Chromium 行为，需真机验证（见 docs/BATCH1-MANUAL-TEST-PLAN.md）。
++ */
++
++const ROOT = path.resolve(tmpdir(), 'deepsea-dist-root')
++const inside = (target: string): boolean => {
++  const rel = path.relative(ROOT, target)
++  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel)
++}
++
++test('3A-1 合法路径继续通过', () => {
++  const index = resolveAppPath(ROOT, 'app://deepsea/index.html')
++  assert.equal(index.ok, true)
++  if (index.ok) assert.equal(index.target, path.join(ROOT, 'index.html'))
++
++  const asset = resolveAppPath(ROOT, 'app://deepsea/assets/app.js')
++  assert.equal(asset.ok, true)
++  if (asset.ok) {
++    assert.equal(asset.target, path.join(ROOT, 'assets', 'app.js'))
++    assert.equal(inside(asset.target), true)
++  }
++})
++
++test('3A-2 根路径映射到 index.html（不是目录本身）', () => {
++  const result = resolveAppPath(ROOT, 'app://deepsea/')
++  assert.equal(result.ok, true)
++  if (result.ok) {
++    assert.equal(result.target, path.join(ROOT, 'index.html'))
++    assert.equal(result.target.endsWith('index.html'), true)
++  }
++})
++
++test('3A-3 编码穿越 %2e%2e%2f 必须拒绝', () => {
++  const result = resolveAppPath(ROOT, 'app://deepsea/%2e%2e%2fdist-other/secret.txt')
++  assert.equal(result.ok, false)
++  if (!result.ok) assert.equal(result.reason, 'escape')
++})
++
++test('3A-4 混合编码穿越（分隔符编码 + 普通路径段）必须拒绝', () => {
++  const variants = [
++    'app://deepsea/assets%2f..%2f..%2fsecret.txt',
++    'app://deepsea/assets/..%2f..%2fsecret.txt',
++    'app://deepsea/..%2fdist-other/secret.txt',
++    'app://deepsea/a%2f%2e%2e%2f%2e%2e%2fsecret.txt',
++  ]
++  for (const url of variants) {
++    const result = resolveAppPath(ROOT, url)
++    assert.equal(result.ok, false, `${url} 必须被拒绝`)
++    if (!result.ok) assert.equal(result.reason, 'escape', `${url} 的拒绝原因应是 escape`)
++  }
++})
++
++test('3A-5 双重编码：只解一次，解出来的 %2e 是文件名而不是穿越', () => {
++  // %252e%252e%252f → 一次 decode → "%2e%2e%2f"（字面量），不是 ".."
++  const result = resolveAppPath(ROOT, 'app://deepsea/%252e%252e%252fsecret.txt')
++  assert.equal(result.ok, true, '单次解码后不含 ..，应视为普通文件名')
++  if (result.ok) assert.equal(inside(result.target), true, '无论如何必须留在 root 内')
++})
++
++test('3A-6 字面 .. 会被 URL 解析器折叠，结果仍在 root 内', () => {
++  // 解析器把 /a/../../secret.txt 折成 /secret.txt，因此不会越界。
++  const result = resolveAppPath(ROOT, 'app://deepsea/a/../../secret.txt')
++  assert.equal(result.ok, true)
++  if (result.ok) {
++    assert.equal(inside(result.target), true)
++    assert.equal(result.target, path.join(ROOT, 'secret.txt'))
++  }
++})
++
++test('3A-7 非法百分号编码必须拒绝（不能让请求静默失败）', () => {
++  for (const url of ['app://deepsea/100%', 'app://deepsea/%E0%A4%A']) {
++    const result = resolveAppPath(ROOT, url)
++    assert.equal(result.ok, false, `${url} 应被拒绝`)
++    if (!result.ok) assert.equal(result.reason, 'decode')
++  }
++})
++
++test('3A-8 错误 host / 错误协议必须拒绝', () => {
++  const wrongHost = resolveAppPath(ROOT, 'app://evil/index.html')
++  assert.equal(wrongHost.ok, false)
++  if (!wrongHost.ok) assert.equal(wrongHost.reason, 'host')
++
++  const wrongScheme = resolveAppPath(ROOT, 'https://deepsea/index.html')
++  assert.equal(wrongScheme.ok, false)
++  if (!wrongScheme.ok) assert.equal(wrongScheme.reason, 'host')
++
++  const lookalike = resolveAppPath(ROOT, 'app://deepsea.evil.com/index.html')
++  assert.equal(lookalike.ok, false, '后缀相同的域名不能算自己人')
++})
++
++test('3A-9 畸形 URL 必须拒绝', () => {
++  const result = resolveAppPath(ROOT, 'not a url')
++  assert.equal(result.ok, false)
++  if (!result.ok) assert.equal(result.reason, 'malformed')
++})
++
++test('3A-10 目录与文件的边界：路径层只判包含，文件判定在 main.ts', () => {
++  // 带尾斜杠的目录请求：路径层允许（还在 root 内），是否可读由 main.ts 的
++  // statSync().isFile() 决定 —— 目录会被当 404，不会 EISDIR 崩掉。
++  const dir = resolveAppPath(ROOT, 'app://deepsea/assets/')
++  assert.equal(dir.ok, true)
++  if (dir.ok) {
++    assert.equal(dir.target, path.join(ROOT, 'assets'))
++    assert.equal(inside(dir.target), true)
++  }
++
++  // root 自身（relative 为空）这一条在 URL 层到不了：WHATWG 规范把 `.`、`%2e`
++  // 都算单点段，解析阶段就折成 `/`（于是映射到 index.html，是合法情况）。
++  // 所以这里只断言防护仍然存在 —— 万一将来换了解析器/改了映射规则，它还能兜住。
++  const source = fs.readFileSync(
++    path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'electron/app-protocol-path.ts'),
++    'utf8',
++  )
++  assert.match(source, /rel === ''/, 'root 自身的防护要保留（防御性）')
++
++  const main = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'electron/main.ts'), 'utf8')
++  assert.match(main, /isFile\(\)/, 'main.ts 必须有 isFile() 判定，否则目录会 EISDIR')
++})
+diff --git "a/C:\\Users\\elyoncat\\AppData\\Local\\Temp\\dsh-LSWQQk\\empty-for-diff.txt" "b/test\\ipc-trust.test.ts"
+index e69de29..376c425 100644
+--- "a/C:\\Users\\elyoncat\\AppData\\Local\\Temp\\dsh-LSWQQk\\empty-for-diff.txt"
++++ "b/test\\ipc-trust.test.ts"
+@@ -0,0 +1,88 @@
++import test from 'node:test'
++import assert from 'node:assert/strict'
++import fs from 'node:fs'
++import path from 'node:path'
++import { fileURLToPath } from 'node:url'
++
++import { isAllowedMainWindowNavigation, isTrustedIpcSenderUrl } from '../electron/trust.ts'
++
++/**
++ * IPC / 导航信任边界（任务 3B）。
++ *
++ * **这是逻辑级测试，不是 Electron 运行时验证。**
++ * URL 判断是纯函数，可以直接断言；但「非可信 frame 真的拿不到 IPC」取决于
++ * Electron 的 event.senderFrame 行为，node 里无法模拟。那部分由两条补充手段守：
++ *   1. 对 main.ts 的结构断言（frame.parent 守卫仍然在、没有 about:* 白名单）；
++ *   2. 真机手动验收（见 docs/BATCH1-MANUAL-TEST-PLAN.md 的 IPC 部分）。
++ */
++
++const here = path.dirname(fileURLToPath(import.meta.url))
++const root = path.resolve(here, '..')
++const main = fs.readFileSync(path.join(root, 'electron/main.ts'), 'utf8')
++
++test('3B-1 合法主窗口 URL 通过', () => {
++  assert.equal(isTrustedIpcSenderUrl('app://deepsea/index.html'), true)
++  assert.equal(isTrustedIpcSenderUrl('app://deepsea/'), true)
++  assert.equal(isTrustedIpcSenderUrl('app://deepsea'), true)
++})
++
++test('3B-2 非可信外部网站拒绝', () => {
++  assert.equal(isTrustedIpcSenderUrl('https://evil.example/'), false)
++  assert.equal(isTrustedIpcSenderUrl('http://chat.deepseek.com/'), false, '外部站点一律不认')
++  assert.equal(isTrustedIpcSenderUrl('https://deepsea.evil.com/'), false, '名字像也不行')
++})
++
++test('3B-3 about:blank 拒绝（这正是批次 1 收紧的那条）', () => {
++  assert.equal(isTrustedIpcSenderUrl('about:blank'), false)
++})
++
++test('3B-4 about:srcdoc 拒绝', () => {
++  assert.equal(isTrustedIpcSenderUrl('about:srcdoc'), false)
++})
++
++test('3B-5 其它可疑协议拒绝', () => {
++  assert.equal(isTrustedIpcSenderUrl('javascript:alert(1)'), false)
++  assert.equal(isTrustedIpcSenderUrl('data:text/html,<script>x</script>'), false)
++  assert.equal(isTrustedIpcSenderUrl('file:///C:/Windows/System32/calc.exe'), false)
++  assert.equal(isTrustedIpcSenderUrl('app://deepsea/../../../etc/passwd'), true,
++    'URL 层只看来源；路径越界由 app-protocol-path 拒绝（见 3A）')
++})
++
++test('3B-6 伪造 / 异常 URL 拒绝', () => {
++  assert.equal(isTrustedIpcSenderUrl(''), false)
++  assert.equal(isTrustedIpcSenderUrl('not a url'), false)
++  assert.equal(isTrustedIpcSenderUrl('   '), false)
++  assert.equal(isTrustedIpcSenderUrl('app://'), false)
++})
++
++test('3B-7 开发地址：只认配置的那个 origin', () => {
++  const dev = 'http://localhost:5173'
++  assert.equal(isTrustedIpcSenderUrl('http://localhost:5173/index.html', dev), true)
++  assert.equal(isTrustedIpcSenderUrl('http://localhost:5174/index.html', dev), false, '端口不同就是不同 origin')
++  assert.equal(isTrustedIpcSenderUrl('http://localhost:5173/index.html', ''), false, '没配置 devUrl 时不应放行')
++  assert.equal(isTrustedIpcSenderUrl('http://localhost:5173/index.html', undefined), false)
++})
++
++test('3B-8 导航白名单同样不放行 about:*', () => {
++  assert.equal(isAllowedMainWindowNavigation('app://deepsea/index.html'), true)
++  assert.equal(isAllowedMainWindowNavigation('about:blank'), false)
++  assert.equal(isAllowedMainWindowNavigation('about:srcdoc'), false)
++  assert.equal(isAllowedMainWindowNavigation('https://evil.example/'), false)
++})
++
++test('3B-9 结构断言：main.ts 仍保留 frame 级守卫', () => {
++  assert.match(main, /frame\.parent !== null/, '子框架必须仍然被挡掉')
++  assert.match(main, /isTrustedIpcSenderUrl\(frame\.url/, 'IPC 来源判断必须走抽出来的函数')
++  assert.match(main, /function isTrustedSender/, '包装器入口还在')
++})
++
++test('3B-10 结构断言：不存在 about:* 白名单后门', () => {
++  assert.equal(/raw === 'about:blank'/.test(main), false, '不能再用 about:blank 白名单')
++  assert.equal(/=== 'about:srcdoc'/.test(main), false, '不能再用 about:srcdoc 白名单')
++})
++
++test('3B-11 结构断言：导航与 IPC 用的是两个函数（不能合并回去）', () => {
++  const navigateCalls = main.match(/isAllowedMainWindowNavigation\(/g) ?? []
++  assert.ok(navigateCalls.length >= 2, 'will-navigate / will-redirect 都要用导航白名单')
++  assert.match(main, /isTrustedIpcSenderUrl/, 'IPC 侧用自己的判断')
++})
