@@ -7,6 +7,8 @@ import { readFileSync } from "node:fs"
 const API = readFileSync("electron/deepseek-api.ts", "utf8")
 const DS = readFileSync("src/lib/deepseek.ts", "utf8")
 const MAIN = readFileSync("electron/main.ts", "utf8")
+/** 登录 / 采集的 IPC handler 已抽到独立模块（便于做真实注册的集成测试）。 */
+const LOGIN_IPC = readFileSync("electron/web-login-ipc.ts", "utf8")
 
 test("Cookie 交给 session + credentials，不手工拼 header", () => {
   assert.ok(API.includes("credentials: " + String.fromCharCode(39) + "include" + String.fromCharCode(39)), "缺少 credentials include")
@@ -31,7 +33,13 @@ test("渲染层只把稳定块交给网页账号，不再从 system 里刨", () 
 test("登录要等 token 出现并验证，不能开窗即采集", () => {
   assert.ok(MAIN.includes("LOGIN_TIMEOUT_MS"), "缺少登录超时")
   assert.ok(MAIN.includes("verifySession"), "登录后没有验证")
-  assert.ok(MAIN.includes("webapi:login"), "缺少 login IPC")
+  assert.ok(LOGIN_IPC.includes("webapi:login"), "缺少 login IPC")
+  // handler 挪到独立模块后，这两条语义必须仍然成立：
+  assert.ok(LOGIN_IPC.includes("while ("), "登录应轮询等待，而不是开窗即采集")
+  assert.ok(
+    LOGIN_IPC.indexOf("deps.capture(win)") < LOGIN_IPC.indexOf("deps.verify()"),
+    "必须先采集到 token 再验证",
+  )
 })
 
 test("HTTP 模式只发最后一条用户消息，不重放历史", () => {

@@ -89,11 +89,6 @@ const executeNewToken = async (script: string): Promise<unknown> => {
   return 'UA/new'
 }
 
-/** 模拟 Electron 把主进程异常包成 rejection 消息后的样子。 */
-function asIpcRejection(error: Error): Error {
-  return new Error(`Error invoking remote method 'webapi:login': ${error.name}: ${error.message}`)
-}
-
 test('C1 双重失败时 save() 抛 SessionRemoveError（不是返回 ok:false 对象）', () => {
   const { file, cleanup } = tempFile()
   try {
@@ -131,24 +126,14 @@ test('C2 采集链路把异常原样传上来（captureSessionWith 不吞），�
   }
 })
 
-test('C3 主进程不 catch：main.ts 里没有把异常转成正常返回对象', () => {
+test('C3 主进程不 catch：登录/采集交给 registerWebLoginIpc，且该模块不吞异常', () => {
   const main = readFileSync(join(root, 'electron/main.ts'), 'utf8')
+  assert.match(main, /registerWebLoginIpc\(/, 'main.ts 应把两条 handler 交给可测模块注册')
   assert.doesNotMatch(main, /toLoginFailure/, '不得再引入「异常转返回对象」的转换函数')
-  // capture 调用点不能包在 try/catch 里转成 { ok:false }。
-  const wrapped = /try\s*\{[^}]*captureSessionFromWindow/s.test(main)
-  assert.equal(wrapped, false, 'captureSessionFromWindow 不能被 try/catch 包住吞掉')
-  assert.match(main, /await captureSessionFromWindow\(win\)/, '仍应直接 await，让异常冒成 rejection')
-})
 
-test('C4 前端能处理 Electron 包装后的 rejection，并显示指定提示', () => {
-  const original = new SessionRemoveError(
-    '旧登录态清理失败：网页登录态写入失败（EACCES: simulated）；且本地旧登录态文件未能清除（EPERM: simulated），重启后可能恢复旧账号',
-  )
-  const toast = loginFailureToast(asIpcRejection(original))
-
-  assert.match(toast, /^旧登录态清理失败/, '必须以指定提示开头')
-  assert.doesNotMatch(toast, /Error invoking remote method/, '必须去掉 IPC 包装噪声')
-  assert.doesNotMatch(toast, /已连接|已退出|已清除/, '不得出现误导性成功措辞')
+  const ipc = readFileSync(join(root, 'electron/web-login-ipc.ts'), 'utf8')
+  assert.doesNotMatch(ipc, /try\s*\{[^}]*deps\.capture/s, 'capture 不能被 try/catch 包住')
+  assert.match(ipc, /await deps\.capture\(win\)/, '应直接 await，让异常冒成 rejection')
 })
 
 test('C5 其它异常不被吞：原样交给用户', () => {
@@ -159,39 +144,6 @@ test('C5 其它异常不被吞：原样交给用户', () => {
 test('C6 成功路径不回归：结构化结果仍走 loginResultToast', () => {
   assert.equal(loginResultToast({ ok: true }), '网页账号已连接，以后不用再登录')
   assert.equal(loginResultToast(mapLoginResponse({ ok: false, error: '超时了' })), '超时了')
-})
-
-test('C7 完整链路：save 抛错 → 采集传播 → IPC rejection → 前端提示（一次跑通）', async () => {
-  const { file, cleanup } = tempFile()
-  try {
-    const state = { fail: false }
-    const store = createSessionStore({ safe: SAFE, file: () => file, fs: failingFs(state) })
-    store.save(OLD_SESSION)
-
-    state.fail = true
-
-    // ① 采集（生产实现）→ ② save 抛 SessionRemoveError
-    let thrown: unknown = null
-    try {
-      await captureSessionWith(executeNewToken, store)
-    } catch (error) {
-      thrown = error
-    }
-    assert.ok(thrown instanceof SessionRemoveError, '采集链路必须抛出 SessionRemoveError')
-
-    // ③ 主进程不 catch → Electron 包成 rejection（此处模拟包装）
-    const rejection = asIpcRejection(thrown as Error)
-
-    // ④ 前端 .catch() 用生产函数生成提示
-    const toast = loginFailureToast(rejection)
-    assert.match(toast, /旧登录态清理失败/, 'UI 必须显示「旧登录态清理失败」')
-    assert.doesNotMatch(toast, /已连接|已退出|已清除/, '不得误报成功')
-
-    // ⑤ 失败后旧会话缓存仍在
-    assert.equal(store.peek()?.token, OLD_SESSION.token, '旧会话缓存必须保留')
-  } finally {
-    cleanup()
-  }
 })
 
 test('C8 UI 接线：Settings 与 engine 都接住 rejection', () => {

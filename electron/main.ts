@@ -7,6 +7,7 @@ import { pathToFileURL } from 'node:url'
 import { closeAllStdio, closeStdio, notifyStdio, requestStdio } from './mcp-stdio'
 import { resolveAppPath } from './app-protocol-path'
 import { isAllowedMainWindowNavigation, isTrustedIpcSenderUrl } from './trust'
+import { registerWebLoginIpc } from './web-login-ipc'
 import {
   type SafeStorageLike,
   readSecureValue,
@@ -826,77 +827,36 @@ if (!singleInstance) {
      * 就采集，必然拿到空 token，于是永远显示「还没登录」。
      * 这里改成轮询窗口里的 localStorage.userToken，出现即采集，再验证一次。
      */
-    trustedHandle('webapi:login', async () => {
-      const win = await ensureWebChatWindow()
-      if (win === null) return { ok: false, error: 'no-window' }
-      win.show()
-      win.focus()
-
-      const deadline = Date.now() + LOGIN_TIMEOUT_MS
-      while (Date.now() < deadline) {
-        // 注意：这里**不 catch**。`save()` 的「双重清理失败」是
-        // SessionRemoveError，必须原样抛出去变成 IPC rejection ——
-        // 一旦在这里转成 `{ ok: false }` 的正常返回，调用方很容易只判 ok 后
-        // 当成普通失败处理，界面就会误报「已清除」。
-        const captured = await captureSessionFromWindow(win)
-        if (captured !== null) {
-          // 存不下来就别假装登录成功：内存已经回滚，这里如实告诉用户原因，
-          // 否则重启后会莫名其妙回到旧账号。
-          if (!captured.persist.ok) {
-            return { ok: false, error: persistFailureText(captured.persist) }
-          }
-          // 验证 token 真的能用，避免存下一个过期的登录态。
-          const verified = await verifySession()
-          if (verified.ok) {
-            // 登录完成就把窗口藏起来：之后聊天不再需要它。
-            win.hide()
-            return { ok: true }
-          }
-          // 网络问题不能说明 token 无效：别把刚采集到的登录态删了，
-          // 直接把原因回给用户，让他去查代理。
-          if (verified.reason !== undefined && /连不上|网络|SSL|TLS/i.test(verified.reason)) {
-            return { ok: false, error: verified.reason }
-          }
-          forgetWebSession()
-        }
-        await new Promise((resolve) => setTimeout(resolve, 1200))
-      }
-      return { ok: false, error: '登录超时了；请重试一次' }
-    })
-
-    /**
-     * 自检：登录态 / 接口 / PoW 分别探一遍，返回给设置页显示。
+    /*
+     * 登录 / 采集两条 IPC。
      *
-     * 顺带把「登录态迁移失败」这类没有独立 UI 入口的问题带出去 —— 否则用户只会
-     * 看到「未登录」，却不知道盘上那份旧明文还没升级成功。
+     * 具体逻辑在 web-login-ipc.ts（那边不 import electron，可以用真实的
+     * 注册表 + channel 路由跑集成测试）。这里只注入真实依赖。
+     *
+     * 关键：两条 handler 都**不 catch** —— `save()` 的双重清理失败必须抛成
+     * IPC rejection，由前端 `.catch()` 显示；一旦在这里转成正常返回，
+     * 调用方很容易只判 ok 后当成普通失败，界面就会误报「已清除」。
      */
-    trustedHandle('webapi:diagnose', async () => {
-      const result = await diagnose()
-      const issue = takeWebSessionIssue()
-      if (issue !== null) result.notes.push(`网页登录态：${issue.message}`)
-      return result
-    })
-
-    /** 本机是否已经有可用的网页登录态。 */
-    trustedHandle('webapi:has-session', async () => {
-      if (!hasWebSession()) return false
-      // 有存档也要确认没过期，否则用户会看到一堆莫名失败。
-      const verified = await verifySession()
-      return verified.ok
-    })
-
-    /** 从网页窗采集登录态（用户登录完由渲染进程调）。 */
-    trustedHandle('webapi:capture', async () => {
-      const win = liveWebChatWindow()
-      if (win === null) return { ok: false, error: 'no-window' }
-      // 同样不 catch：失败以 IPC rejection 传出去，由前端 .catch() 显示。
-      const captured = await captureSessionFromWindow(win)
-      if (captured === null) return { ok: false, error: '还没登录：窗口里没有 userToken' }
-      if (!captured.persist.ok) {
-        return { ok: false, error: persistFailureText(captured.persist) }
-      }
-      return { ok: true }
-    })
+    registerWebLoginIpc(
+      { handle: (channel, listener) => trustedHandle(channel, listener as TrustedHandler) },
+      {
+        loginTimeoutMs: LOGIN_TIMEOUT_MS,
+        ensureWindow: () => ensureWebChatWindow(),
+        liveWindow: () => liveWebChatWindow(),
+        showAndFocus: (win) => {
+          const target = win as BrowserWindow
+          target.show()
+          target.focus()
+        },
+        hideWindow: (win) => (win as BrowserWindow).hide(),
+        capture: (win) => captureSessionFromWindow(win as BrowserWindow),
+        verify: () => verifySession(),
+        forget: () => forgetWebSession(),
+        persistFailureText,
+        sleep: (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+        now: () => Date.now(),
+      },
+    )
 
     /**
      * 忘掉登录态（登出/过期后重新引导）。
