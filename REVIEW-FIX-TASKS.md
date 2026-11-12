@@ -215,57 +215,79 @@ net.ts:142-149 toBridgeRequest 丢 signal
 
 ## 4. 批次 3 · 请求 / 解析 / 记忆正确性
 
-### T-10 · SSE 末尾事件未 flush；200 非 SSE 整包无兜底 `【已知未修】` `S`
+### T-10 · SSE 末尾事件未 flush；200 非 SSE 整包无兜底 `【已知未修】` `S` `✅已实施`
 
 - **位置**：`deepseek.ts:383-398`（consume 只在空行处分事件）、`:448-450`（netStream 后直接 return，buffer 丢弃）、`:465`（finish(false)）
 - **对照**：`media-api.ts:860` 有 flush、`:863-871` 有非 SSE JSON 兜底；`BUG-REVIEW.md:113` 已记录「SSE 收尾帧不解析」。
 - **后果**：最后一个事件（常见 usage / 末段 content / finish_reason）静默丢失；网关忽略 `stream:true` 回完整 JSON 时整轮空白且无报错。
 - **补丁**：netStream 之后、`return` 之前，若 `!sawErrorStatus && buffer.trim() !== ''` 调一次 `consume('\n\n')`；再对 `content === ''` 且 buffer 解析不出 chunk 的情况用 `parseCompleteContent(protocol, JSON.parse(response.text))` 兜一次正文。
 
-### T-11 · 400 兼容退避无效 `【本轮新增】` `S`
+### T-11 · 400 兼容退避无效 `【本轮新增】` `S` `✅已实施`
 
 - **位置**：`deepseek.ts:229-261`（buildBody）、`:424`（payload 构造）、`:455`（3 次上限）、`:472-486`（退避分支）
 - **核实要点**（比表面现象更深一层）：`body` 由 `buildOpenAiBody({ includeUsage: true })`（`:229-240`）构造，**本身就带 `stream_options`**。`:472-475` 只把外层 `includeUsage` 置 false，而 `:424` 的 `{ ...body, messages, ...(includeUsage ? … : {}) }` 展开时**旧字段仍在** → 重试仍发送 `stream_options`。另外 `:483-486` 无条件 `changed = true`；非 openai 协议 `:425` 的 payload 直接用 `body`、不随 `messages` 重建，所以 `stripReasoning(messages)` 改了也没用。
 - **后果**：同一 400 最多重复 3 次整段请求（放大），兼容网关永久不可用。
 - **补丁**：`stream_options` 分支加 `delete body.stream_options`；`reasoning_content` 分支仅当 `messages.some(m => m.reasoning_content !== undefined)` 才 strip 并置 `changed`；非 openai 时 `body = buildBody(sentLimit)` 重建。
 
-### T-12 · OpenRouter 语音 SSE 只按 `\n\n` 切 `【本轮新增】` `S`
+### T-12 · OpenRouter 语音 SSE 只按 `\n\n` 切 `【本轮新增】` `S` `✅已实施`
 
 - **位置**：`media-api.ts:834`（`raw.indexOf('\n\n')`）、`:860`（收尾只补 `\n\n`）；对照 `deepseek.ts:386` 正确用了 `/\r?\n\r?\n/`
 - **后果**：CRLF 分隔的网关全程找不到边界，收尾把所有 `data:` 行 join 成一个 payload → JSON.parse 失败 → 502「语音模型没有返回音频」。`test/media-tools.test.ts:232-233` 只覆盖 `\n\n`。
 - **补丁（一行）**：边界改 `/\r?\n\r?\n/.exec(raw)`，或把入 raw 的 `\r\n` 归一为 `\n`。补一条 CRLF 测试。
 
-### T-13 · `planUpsert` 的 bestCover 错配 `【已知未修】` `M`
+### T-13 · `planUpsert` 的 bestCover 错配 `【核实结论：不是 bug】` `M` `✅已核实并清理（等价重构）`
 
-- **位置**：`memory-core.ts:192-212`；`BUG-REVIEW.md:138` 已记录「并列阈值时 cover 与 best 不同步」
-- **现状**：`best` 按 `Math.max(score, cover)` 选（`:202`），但 `bestCover` 只记**被选中那条**的 cover（`:204`），`:208` 却用 `bestCover >= 0.88` 判 update。库中同时有 A（cover=0.95、jaccard=0.2）与 B（cover=0.1、jaccard=0.96）时 B 胜出，高包含度的 A 被忽略。
-- **后果**：本该 update 的老记忆变成 pending/新增，重复与矛盾记忆堆积。
-- **补丁**：单独维护 `bestCoverMax`（cover 最优者判 update）与 `bestScore`（score 最优者判 pending），两者独立。
+- **位置**：`memory-core.ts:186-212`；`BUG-REVIEW.md:138` 已记录「并列阈值时 cover 与 best 不同步」
+- **原判断**：`best` 按 `Math.max(score, cover)` 选（`:202`），但 `bestCover` 只记**被选中那条**的 cover（`:204`），`:208` 却用 `bestCover >= 0.88` 判 update。库中同时有 A（cover=0.95、jaccard=0.2）与 B（cover=0.1、jaccard=0.96）时 B 胜出，高包含度的 A 被忽略。
+- **核实结论（批次 3 开工前复核）**：**这个错配不可能发生，原补丁是空操作。**
+  - `jaccard = 交集 / (|A| + |B| - 交集)`，`containment = 交集 / min(|A|, |B|)`。
+  - 因为 `|A| + |B| - 交集 ≥ min(|A|, |B|)`，分母更大 ⇒ **jaccard 恒 ≤ containment**。
+  - 所以 `Math.max(score, cover)` 永远等于 `cover`，`bestScore` 与 `bestCover` 恒等，
+    `score` 从头到尾没影响过任何判定 —— 「用 Jaccard 认矛盾」这条线从未生效。
+  - 原文举的「A cover=0.95 / B jaccard=0.96 且 cover=0.1」在几何上不成立：
+    jaccard 高的两条，包含度必然也高（`jaccard ≤ containment`）。
+  - 结论：**没有按原补丁拆 `bestCoverMax` + `bestScore`** —— 拆了也永远指向同一条记录，
+    只会让代码看起来像修好了。
+- **实际处理**：把实现写清楚（删掉恒等的 `bestScore` 与死掉的 `jaccard` 计算，判定统一用
+  包含度：≥0.88 更新 / ≥0.35 疑似矛盾 / 其余新增），**行为逐字节不变**。
+  验证方式是**前后都绿**（换回旧实现跑同样用例也全绿），并在 `memory-core.test.ts`
+  加了一条不变量用例守着 `jaccard ≤ containment` —— 前提要是变了，它会先红。
+- **仍未解决的真实问题**（留给后续评估，不属于本条）：`CONFLICT_THRESHOLD` 现在按包含度判
+  「话题撞车」，短句被长句覆盖到 0.35 以上就算疑似矛盾；如果希望按 Jaccard 判，
+  得先接受 jaccard 天然比包含度低一档，阈值要重新标定。
 
-### T-14 · 媒体先写库、消息后写库 → 孤儿媒体 `【本轮新增】` `M`
+### T-14 · 媒体先写库、消息后写库 → 孤儿媒体 `【本轮新增】` `M` `✅已实施`
 
 - **位置**：`engine.ts:1180-1210`（`:1191` putMedia、`:1210` appendMessage）
 - **后果**：`appendMessage` 抛错或 `putMedia` 循环中途抛错（`:1194` catch 只改文案），media 表里留下 `messageId` 指向不存在消息的记录，字节永久残留。
 - **补丁**：`:1183-1193` 的 putMedia 循环包 try/catch，失败时 `await deleteMediaByMessage(messageId)` 回滚——**`db.ts:602` 已有现成函数**。或先 append 占位消息再写媒体。
 
-### T-15 · 33ms debounce timer 泄漏 / 跨轮污染 live `【本轮新增】` `M`
+### T-15 · 33ms debounce timer 泄漏 / 跨轮污染 live `【本轮新增】` `M` `✅已由 PR #4 修复（提交 35aea1a）`
 
 - **位置**：`engine.ts:647-659`（schedule 挂 timer）、`:724`（flush 只在成功返回后调用）、`:667-728`（streamOnce 无 try/finally）
 - **后果**：网络中断 / SSE error / 400 退避耗尽 → `streamChat` 抛错 → `:724` 不执行，33ms 后残留 `flush()` 仍 `updateLive(...)`；若新一轮已 `startLive`（`store.ts:634-643` 无条件覆盖），旧轮半截正文写进新轮占位气泡。`bodyMind.drainEvents()` 也被跳过。
 - **补丁**：`streamOnce` 的 `await streamChat(...)` 包 try/finally，finally 中清 `timer` / `pendingFlush`。
 
-### T-16 · dedupePayloads 用 b64 前 80 字判重 `【本轮新增】` `L`
+### T-16 · dedupePayloads 用 b64 前 80 字判重 `【本轮新增】` `L` `✅已实施`
 
 - **位置**：`media-api.ts:182` `` key = `b64:${payload.b64.slice(0, 80)}` ``
 - **后果**：一次返回多张同格式/同尺寸图（PNG 头前 80 字符相同）时真图被误当重复丢掉，`count>1` 少图。
 - **补丁（一行）**：key 用完整 b64，或「长度 + 前80 + 后80」。
 
-### T-17 · 工具跨轮重放无去重 `【本轮新增】` `L`
+### T-17 · 工具跨轮重放无去重 `【本轮新增】` `L` `⏸本轮暂缓（放到批次 3 之后单独评估）`
 
-- **位置**：`engine.ts:885-896`
+- **位置**：`engine.ts:885-896`（批次 3 基线里是 `:998-1029`）
 - **现状**：逐个执行 `result.toolCalls`，不比对 `call.id` 或 `(name, arguments)` 与之前轮次；`MAX_TOOL_ITERATIONS = 10`（`:43`）只是总轮数闸。
 - **补丁**：`runAssistantTurn` 内加 `const seen = new Set<string>()`，循环里命中即跳过并回一条「已执行过」的 tool 结果消息（**保持配对**，否则又造一个 T-04）。
+  - **实施要求（写死在这里，免得下次又发明一套）**：跳过分支必须**复制现有 abort 占位消息的处理方式**
+    （批次 3 基线 `engine.ts:1004-1018`：拼一条 `role: 'tool'` 消息、`appendMessage` 落库、
+    `history = [...history, skipped]` 再 `continue`），不要另写一套消息写入逻辑。
+  - 还要和 `result.truncatedToolCallIds`（半截参数不执行）区分开：两个 `continue` 分支文案不同，别混。
 - **备注**：单次流内重复执行**未发现**——工具只在流结束后执行一次，`protocols.ts:56-60` 按 Map index 定稿去重。
+- **为什么本轮暂缓**：不只是收益低（只有「模型跨轮重复调用同一工具」才命中）。它与 T-14 共用
+  `engine.ts`，还会触发 `sending-state.test.ts:104` 的源码正则与 `agent-loop.test.ts:47` 的切片断言；
+  在取消语义（T-04/T-05/T-08）刚收口的时候动这里，等于把风险叠在同一处。
+  **建议**：等 T-14 落地并跑完全量、确认无回归之后，再单独评估；没有实际复现或明确收益就跳过。
 
 ---
 
@@ -277,14 +299,20 @@ net.ts:142-149 toBridgeRequest 丢 signal
 - **现状**：`deepseek.ts` 全文 grep 不到 `timeoutMs`；Electron/Android 才有 120s 默认（`main.ts:245-251`、`DeepSeaHttpPlugin.java:51`）。纯浏览器预览挂死连接会永久挂起（含 `completeJson` 的记忆抽取）。另 `net.ts:457-463` / `:548-554` 在 `streamId === ''` 时 abort 是 no-op，拿到 id 后不复查。
 - **补丁**：三个调用点补 `timeoutMs: 120000`；`streamViaBridge`/`streamViaPlugin` 拿到 id 后补 `if (options.signal?.aborted) abort()`。
 
-### T-19 · 体积上限函数零调用 `【本轮新增】` `M`
+### T-19 · 体积上限函数零调用 `【本轮新增】` `M` `✅已实施`
 
 - **位置**：`media-store.ts:12-14,67-72`（`MAX_IMAGE_BYTES` / `MAX_AUDIO_BYTES` / `mediaWithinLimit`）、`media-api.ts:489-494`（参考图只判能否 parse）、`engine.ts:1191`
 - **核实**：`grep` 全仓 `src/` —— `mediaWithinLimit` **只有定义处、零调用**（仅 `test/media-tools.test.ts:7` 引用同模块的 `estimateDataUrlBytes`）；`isMediaAbort`（`media-api.ts:979`）同样零调用。
 - **后果**：>16MB 图 / >12MB 语音照样转 data URL 落 IndexedDB；任意多张超大参考图可构造任意大 JSON 请求体（还会经 IPC 再复制一次）。
 - **补丁**：`media-tools` 生成 drafts 后 `filter(d => mediaWithinLimit(d.kind, d.dataUrl))`，超限回「图片太大」；`generateImages` 里对 `cleanReferences` 加张数(≤4)与总字节上限。
+- **实施记录**：
+  - `media-tools.ts`：生图/语音落库前各加一道 `mediaWithinLimit`；全被拦时回「太大/太长，没有保存」。
+  - `media-api.ts`：参考图改为「张数 ≤4 + 单张 ≤16MB + 总量 ≤16MB」；**只因为太大**才一张不剩时抛
+    「参考图太大」，不偷偷不带图去生成（本来就不是 data URL 的照旧静默忽略）。
+  - 原「核实」里那句「`isMediaAbort` 同样零调用」**已过期**：PR #4 的 T-07 已经把它接上了
+    （`media-tools.ts` 的生图/语音 catch）。
 
-### T-20 · base64 大文件峰值复制 4~6 份 `【本轮新增】` `M`
+### T-20 · base64 大文件峰值复制 4~6 份 `【本轮新增】` `M` `✅已实施（与 T-19 同一提交）`
 
 - **位置**：`net.ts:297-304`（bytesToBase64）、`media-api.ts:513-540` / `:875-881`、`media-store.ts:31-33`、`media-api.ts:289`（JSON.stringify body）
 - **后果**：16MB 图峰值约 60~100MB 常驻字符串，WebView/IDB 有 OOM 与配额风险；原生通道还要跨进程序列化一次。
@@ -812,4 +840,107 @@ app://deepsea/..%2fdist-other/secret.txt      decoded=/../dist-other/secret.txt
 3. 停止后等 1 秒 → 不应该出现「幽灵半截气泡」；新一轮气泡里不应混进上一轮的字；
 4. 停止后看用量/摘要：不应新增记账；
 5. 生图/语音进行中点停止 → 不应出现「已生成」卡片，媒体表里不该留字节。
+
+---
+
+## 15. 批次 3 执行记录（T-10 ~ T-20）
+
+### 15.0 基线
+
+| 项 | 值 |
+|---|---|
+| 基线 SHA | `1cde1dd`（`fix/orca-bubble-copy` 的 HEAD） |
+| 开发分支 | `fix/batch3-parser` |
+| 开工前复核 | `git rev-parse fix/orca-bubble-copy` = `1cde1ddfb1f41dba2ebeb17c82faf7e4c7dfa886`，与预检报告一致，没有漂移 |
+| 落地前的绿线 | `tsc --noEmit` 0 错误；全量 **525 项 / 519 通过 / 0 失败 / 6 跳过** |
+
+> 没有在 `wip/ui-feedback-1-legacy` 上直接改：那个工作区的 `engine.ts` 还是 PR #4 之前的版本
+> （`git diff fix/orca-bubble-copy -- src/lib/engine.ts` 能看到 `turnGate`/`runSend` 被换回 `let busy`）。
+
+### 15.1 分组与提交
+
+| 组 | 条目 | 提交 |
+|---|---|---|
+| A | T-10 + T-11 | `fix(deepseek): SSE 尾包 flush + 400 退避真的剥字段` |
+| B | T-12 + T-16 | `fix(media): 语音 SSE 容忍 CRLF 边界 + 多图判重不再误杀` |
+| C | T-19 + T-20 | `fix(media): 体积上限真正接线` |
+| D | T-14（T-17 暂缓） | `fix(engine): 媒体写入失败/消息落库失败时回滚` |
+| — | T-13（核实后清理） | `refactor(memory): planUpsert 的「两条判定线」其实是一条` |
+
+### 15.2 T-10 SSE 尾包 + 非 SSE 兜底 `✅已实施`
+
+- 收流后补一次 `consume('\n\n')`（`done` 为真时跳过），把没有空行结尾的最后一个事件收进来。
+- `sawPayload` 标记「这一轮到底解析出过事件没有」，据此区分「网关按 SSE 说话但正文确实为空」
+  与「网关压根没按 SSE 回」。后者再按整包 JSON 兜一次正文（`parseCompleteContent`），
+  解析出正文就当一次增量交给界面。
+- 与 media-api.ts 的既有写法对齐（那边一直有 flush + 非 SSE 兜底）。
+
+### 15.3 T-11 400 退避 `✅已实施`
+
+- `stream_options` 分支补 `delete body.stream_options`（原来只关 `includeUsage` 开关，
+  `{...body}` 展开时字段仍在，同一个 400 会重试满三次整段请求）。
+- `reasoning_content` 分支改为「真的剥掉了才算 changed」。
+- **没有**加原补丁里的「非 OpenAI 时 `body = buildBody(sentLimit)` 重建」：协议层的
+  `toAnthropicMessages` / `toGoogleContents` 是从 text/images/tool_calls 重新拼消息的，
+  本来就不带 `reasoning_content`，重建等于没改。代码里留了注释说明，真要支持得改协议层。
+
+### 15.4 T-12 CRLF 边界 `✅已实施`
+
+`raw.indexOf('\n\n')` → `/\r?\n\r?\n/.exec(raw)`，与 `deepseek.ts` 的 SSE 解析一致。
+注意单事件 + CRLF 靠收尾 flush 侥幸能过，真正炸的是**一个 chunk 里多个 CRLF 事件**，
+测试按这个形状写。
+
+### 15.5 T-13 bestCover 错配 `✅已核实：不是 bug`
+
+见上方 T-13 条目。一句话：`jaccard` 恒 ≤ `containment`，所以 `Math.max(score, cover)` 永远
+等于 `cover`，`bestScore` 与 `bestCover` 恒等，原补丁是空操作。本次只做等价清理。
+
+### 15.6 T-14 孤儿媒体 `✅已实施`
+
+两处失败路径都回滚（`db.ts:602` 的 `deleteMediaByMessage`）：
+`putMedia` 循环中途抛错、`appendMessage` 最终失败。没有采用「先 append 占位消息再写媒体」——
+它与「引用必须先能查到」的渲染顺序冲突，也会破坏 T-05 的停止语义。
+
+### 15.7 T-16 b64 前 80 字判重 `✅已实施`
+
+判重键改「长度 + 头 80 + 尾 80」，兼顾区分度与内存（不拿完整 base64 当 key）。
+
+### 15.8 T-19 / T-20 体积上限 `✅已实施`
+
+见上方 T-19 的实施记录；`bytesToBase64` 改数组 join，TTS 解析完释放 `raw` / `audioData`。
+
+### 15.9 T-17 工具跨轮重放去重 `⏸本轮暂缓`
+
+理由与实施要求写在 T-17 条目里。**不进本分支。**
+
+### 15.10 测试
+
+| 文件 | 变化 |
+|---|---|
+| `test/stream-parser.test.ts` | **新增 6 项**，真 `streamChat` + 真 `net.ts` 传输层，只 stub `globalThis.fetch` |
+| `test/media-tools.test.ts` | **新增 6 项**（T-12 / T-16 / T-19 ×4） |
+| `test/media-rollback.test.ts` | **新增 4 项**（T-14 源码结构断言，engine 依赖 IndexedDB 跑不起来） |
+| `test/memory-core.test.ts` | **新增 1 项**（T-13 的 `jaccard ≤ containment` 不变量） |
+
+**验证方式**：每条用例都做过「回滚实现 → 变红 → 恢复 → 变绿」。
+唯一的例外是 T-13：它是等价重构，**前后都绿**（换回旧实现跑同样用例也全绿）。
+
+**本轮结果**：`tsc --noEmit` 0 错误；全量 **542 项 / 536 通过 / 0 失败 / 6 跳过**；`vite build` 通过。
+
+### 15.11 还没验证的（重要）
+
+以上全部是**自动化测试 + 类型检查 + 打包**，不是真机行为验证。真机上需要确认：
+
+1. 用**末尾不带空行**的网关（或抓包确认）聊一轮长回复 → 最后一段正文与用量都在，不丢字；
+2. 换一个忽略 `stream:true`、直接回整包 JSON 的中转站 → 能正常出字，不再是空白气泡；
+3. 换一个只认老字段的中转站（会 400 提 `stream_options`）→ 第二次请求能成功，
+   日志里不该看到同一个 400 重试三次；
+4. OpenRouter 语音（若网关回 CRLF）→ 能正常出播放器，不再是「语音模型没有返回音频」；
+5. 一次要 4 张图 → 4 张都回来，不是 1 张；
+6. 生图/语音期间杀掉进程或断网 → 重新打开后媒体表里没有孤儿记录（这条只能靠日志/开发者工具看）。
+
+### 15.12 本分支没做的
+
+T-17（暂缓）、T-18（浏览器通道超时）、T-21 ~ T-40。T-18 仍是 `deepseek.ts` 三个调用点
+各补一个 `timeoutMs: 120000` 就能落地的小改动，随时可以单开一个提交。
 
