@@ -248,7 +248,7 @@ function statefulFs(state: { failWrites: boolean; failUnlink: boolean }): Sessio
   }
 }
 
-test('S11 换账号写失败且旧会话清不掉：必须报 stale-not-removed，且不得清空内存', () => {
+test('S11 换账号写失败且旧会话清不掉：必须抛 SessionRemoveError，且不得清空内存', () => {
   const { file, cleanup } = tempSessionFile()
   try {
     const state = { failWrites: false, failUnlink: false }
@@ -257,14 +257,18 @@ test('S11 换账号写失败且旧会话清不掉：必须报 stale-not-removed�
 
     state.failWrites = true
     state.failUnlink = true
-    const result = store.save(SESSION_B, { invalidateStale: true })
 
-    assert.equal(result.ok, false)
-    if (!result.ok) {
-      assert.equal(result.reason, 'stale-not-removed', '不能报成普通写入失败')
-      assert.match(result.message, /未能清除/)
-      assert.match(result.message, /重启后可能恢复旧账号/)
-    }
+    // 双重失败必须是**异常**，不能是「返回一个 ok:false 的对象」——
+    // 对象很容易被调用方只判 ok 然后当成普通失败悄悄吞掉。
+    assert.throws(
+      () => store.save(SESSION_B, { invalidateStale: true }),
+      (error: unknown) => {
+        assert.ok(error instanceof SessionRemoveError, '必须是 SessionRemoveError')
+        assert.match((error as Error).message, /未能清除/)
+        assert.match((error as Error).message, /重启后可能恢复旧账号/)
+        return true
+      },
+    )
     assert.equal(store.peek()?.token, SESSION_A.token, '旧会话还在时不能清内存、更不能声称已清除')
   } finally {
     cleanup()
@@ -302,9 +306,9 @@ test('S13 unlink 失败但截断成功：视为旧会话已失效，forget 成�
   }
 })
 
-test('S14 结构断言：调用链不会把「旧会话未清除」报成「已清除」', () => {
+test('S14 结构断言：main.ts 把双重失败交给 toLoginFailure，不自行吞掉', () => {
   const main = readFileSync(join(root, 'electron/main.ts'), 'utf8')
-  assert.match(main, /stale-not-removed/, 'main.ts 必须识别旧会话未清除这一分支')
-  assert.match(main, /persistFailureText/, '登录失败文案必须走统一出口')
-  assert.match(main, /重启后可能恢复旧账号/, '必须如实提示后果')
+  const calls = main.match(/toLoginFailure\(error\)/g) ?? []
+  assert.ok(calls.length >= 2, '登录与采集两个入口都必须把异常转成明确失败响应')
+  assert.doesNotMatch(main, /stale-not-removed/, '旧的「返回失败对象」分支应已移除')
 })

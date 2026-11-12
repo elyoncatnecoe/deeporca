@@ -29,7 +29,7 @@ import { PROTOCOL_LABEL, currentProvider } from '../lib/providers'
 import { visionOf, type VisionProvider } from '../lib/capability'
 import type { Settings, ThinkingEffort } from '../lib/types'
 import { webModeScript } from '../lib/web-mode'
-import { diagnoseWebChat, loginWebChat } from '../lib/web-chat'
+import { diagnoseWebChat, loginResultToast, loginWebChat } from '../lib/web-chat'
 import { Avatar } from './Avatar'
 import { IconButton, ScreenHeader, Select, Switch, type SelectOption } from './ui'
 import { confirmDialog } from './ConfirmDialog'
@@ -763,9 +763,15 @@ export function SettingsScreen() {
                 type="button"
                 className="ghost-button"
                 onClick={() => {
-                  void loginWebChat().then((result) => {
-                    actions.showToast(result.ok ? '网页账号已连接，以后不用再登录' : result.message ?? '登录没有完成')
-                  })
+                  void loginWebChat()
+                    .then((result) => {
+                      actions.showToast(loginResultToast(result))
+                    })
+                    .catch((error: unknown) => {
+                      // 主进程会把「旧登录态清理失败」转成失败响应；能走到这里说明
+                      // IPC 本身抛了（rejection）。同样必须让用户看见，不能静默。
+                      actions.showToast(error instanceof Error ? error.message : '登录流程出错')
+                    })
                 }}
               >
                 <Waves size={15} /> 登录网页账号

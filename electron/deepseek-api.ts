@@ -28,7 +28,9 @@ import { Worker } from 'node:worker_threads'
 import { PatchReader, iterSse } from './sse'
 import { powHeader, solvePow, type PowChallenge } from './pow'
 import {
+  captureSessionWith,
   createSessionStore,
+  type CapturedSession,
   type SessionPersistResult,
   type WebSession,
   type WebSessionIssue,
@@ -109,39 +111,14 @@ export function takeWebSessionIssue(): WebSessionIssue | null {
 /* 从网页窗采集登录态                                                  */
 /* ------------------------------------------------------------------ */
 
-/** 网页把 token 存在 localStorage.userToken 里，形状是 {"value":"<TOKEN>"}。 */
-const READ_TOKEN_JS = `(() => {
-  try {
-    var raw = window.localStorage.getItem('userToken');
-    if (!raw) return null;
-    var o = JSON.parse(raw);
-    return (o && o.value) ? o.value : null;
-  } catch (e) { return null; }
-})()`
-
-/** 采集结果：既要拿到会话，也要拿到「有没有真的存下来」。 */
-export interface CapturedSession {
-  session: WebSession
-  persist: SessionPersistResult
-}
+/** 采集与保存的逻辑在 web-session.ts（那边不 import electron，可跑完整调用链测试）。 */
+export type { CapturedSession } from './web-session'
 
 export async function captureSessionFromWindow(win: BrowserWindow): Promise<CapturedSession | null> {
-  const token = await win.webContents
-    .executeJavaScript(READ_TOKEN_JS, true)
-    .catch(() => null) as string | null
-  if (token === null || token === '') return null
-  const userAgent = await win.webContents
-    .executeJavaScript('navigator.userAgent', true)
-    .catch(() => '') as string
-  const next: WebSession = {
-    token,
-    userAgent: userAgent !== '' ? userAgent : 'Mozilla/5.0',
-    savedAt: Date.now(),
-  }
-  // 这是「登录/换账号」路径：写失败时必须让盘上的旧会话失效，否则重启会复活旧账号。
-  const persist = saveSession(next, { invalidateStale: true })
-  if (!persist.ok) sessionStore.reportIssue({ kind: 'save-failed', message: persist.message })
-  return { session: next, persist }
+  return await captureSessionWith(
+    (script) => win.webContents.executeJavaScript(script, true) as Promise<unknown>,
+    sessionStore,
+  )
 }
 
 /* ------------------------------------------------------------------ */

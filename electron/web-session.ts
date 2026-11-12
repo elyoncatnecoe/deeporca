@@ -38,15 +38,7 @@ interface StoredSession {
  */
 export type SessionPersistResult =
   | { ok: true }
-  | {
-    ok: false
-    /**
-     * `stale-not-removed` 是单独的：写入失败了，而且盘上那份**旧会话也清不掉**。
-     * 这种情况必须让上层知道「重启后可能恢复旧账号」，不能报成普通的写入失败。
-     */
-    reason: 'no-encryption' | 'write-failed' | 'stale-not-removed'
-    message: string
-  }
+  | { ok: false; reason: 'no-encryption' | 'write-failed'; message: string }
 
 /** 删除登录态失败（既删不掉也截断不了）。 */
 export class SessionRemoveError extends Error {
@@ -218,15 +210,18 @@ export function createSessionStore(options: SessionStoreOptions): SessionStore {
         return { ok: false, reason, message }
       }
       /*
-       * 旧会话文件清不掉：**不能**清内存、也**不能**声称已清除。
-       * 保持上一份内存状态（它至少和磁盘一致），把「旧会话还在」这件事明确报上去。
+       * 新会话没写进去、旧会话又清不掉 —— 这是**双重失败**。
+       *
+       * 这种情况下「返回一个 ok:false 的对象」是不够的：调用方很可能只判断
+       * `ok`，然后照样清 UI、照样提示「已退出/已清除」，而磁盘上那份旧 token
+       * 还在，重启就会登回旧账号。所以这里必须抛专用异常，让失败无法被忽略。
+       *
+       * 内存保持原状（不清空、不覆盖），因为盘上那份旧状态仍然有效且仍在使用。
        */
       cached = previous
-      return {
-        ok: false,
-        reason: 'stale-not-removed',
-        message: `${message}；且本地旧登录态文件未能清除（${removed.message}），重启后可能恢复旧账号`,
-      }
+      throw new SessionRemoveError(
+        `${message}；且本地旧登录态文件未能清除（${removed.message}），重启后可能恢复旧账号`,
+      )
     }
 
     const sealed = sealToken(next.token)
@@ -313,4 +308,54 @@ export function createSessionStore(options: SessionStoreOptions): SessionStore {
   }
 
   return { load, save, forget, takeIssue, reportIssue, peek: () => cached }
+}
+
+/* ------------------------------------------------------------------ */
+/* 采集登录态（与 electron 解耦，便于在 node 里跑完整调用链测试）        */
+/* ------------------------------------------------------------------ */
+
+/** 网页把 token 存在 localStorage.userToken 里，形状是 {"value":"<TOKEN>"}。 */
+const READ_TOKEN_JS = `(() => {
+  try {
+    var raw = window.localStorage.getItem('userToken');
+    if (!raw) return null;
+    var o = JSON.parse(raw);
+    return (o && o.value) ? o.value : null;
+  } catch (e) { return null; }
+})()`
+
+const READ_UA_JS = 'navigator.userAgent'
+
+/** 在网页窗里执行一段脚本（真实实现是 `win.webContents.executeJavaScript`）。 */
+export type ScriptExecutor = (script: string) => Promise<unknown>
+
+/** 采集结果：既要拿到会话，也要拿到「有没有真的存下来」。 */
+export interface CapturedSession {
+  session: WebSession
+  persist: SessionPersistResult
+}
+
+/**
+ * 采集登录态并保存。
+ *
+ * 这是 `webapi:login` / `webapi:capture` 的核心。**保存失败会抛
+ * `SessionRemoveError`（双重清理失败）**，调用方必须把它变成明确的失败响应，
+ * 不能吞掉、更不能当成功。
+ */
+export async function captureSessionWith(
+  execute: ScriptExecutor,
+  store: SessionStore,
+): Promise<CapturedSession | null> {
+  const token = await execute(READ_TOKEN_JS).catch(() => null) as string | null
+  if (token === null || token === '') return null
+  const userAgent = await execute(READ_UA_JS).catch(() => '') as string
+  const next: WebSession = {
+    token,
+    userAgent: userAgent !== '' ? userAgent : 'Mozilla/5.0',
+    savedAt: Date.now(),
+  }
+  // 这是「登录/换账号」路径：写失败时必须让盘上的旧会话失效，否则重启会复活旧账号。
+  const persist = store.save(next, { invalidateStale: true })
+  if (!persist.ok) store.reportIssue({ kind: 'save-failed', message: persist.message })
+  return { session: next, persist }
 }
