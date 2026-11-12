@@ -173,10 +173,36 @@ test('二审 P2：纯静态的三元不报 unresolved（条件本身不是类名
   assert.equal(scan.unresolved, false)
 })
 
-test('二审 P2：布尔守卫（cond && 字面量）不算动态残留', () => {
+test('三审 P2：&& 左操作数证明不了是布尔，必须报 unresolved（styles.active && 字面量）', () => {
+  const scan = scanClassNames("{styles.active && 'fallback'}")
+  assert.deepEqual(scan.static, ['fallback'], '右侧静态类名照常提取')
+  assert.equal(scan.unresolved, true, 'styles.active 可能是非空字符串，本身就是类名来源 —— 不许猜')
+})
+
+test('三审 P2：`on && 字面量` 同样报 unresolved（on 的类型静态层面未知）', () => {
   const scan = scanClassNames("{on && 'is-on'}")
   assert.deepEqual(scan.static, ['is-on'])
-  assert.equal(scan.unresolved, false, 'on 产出的是布尔值，不是类名')
+  assert.equal(scan.unresolved, true, '以前把 on 当布尔放过，属于猜测')
+})
+
+test('三审 P2：`||` 左操作数同样不许猜', () => {
+  const scan = scanClassNames("{cls || 'fallback'}")
+  assert.deepEqual(scan.static, ['fallback'])
+  assert.equal(scan.unresolved, true)
+})
+
+test('三审 P2：能证明是布尔的写法仍然不误报', () => {
+  const negated = scanClassNames("{!open && 'is-on'}")
+  assert.deepEqual(negated.static, ['is-on'])
+  assert.equal(negated.unresolved, false, '!open 一定是布尔')
+
+  const compared = scanClassNames("{mode === 'group' && 'is-group'}")
+  assert.deepEqual(compared.static, ['is-group'])
+  assert.equal(compared.unresolved, false, 'mode === ... 是布尔比较')
+
+  const numeric = scanClassNames("{count > 0 && 'has-items'}")
+  assert.deepEqual(numeric.static, ['has-items'])
+  assert.equal(numeric.unresolved, false, 'count > 0 是布尔比较')
 })
 
 test('二审 P2：报告能给出文件、行号和原始表达式', () => {

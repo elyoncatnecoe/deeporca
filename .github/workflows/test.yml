@@ -1,0 +1,39 @@
+# 每次 push / PR 都跑一遍测试。
+#
+# 只做两件事：类型检查 + 全量测试。不打包、不发版 —— 打包依赖 Android SDK 与
+# Windows 签名，放在本地脚本里（scripts/build-android.mjs / build-exe.mjs）。
+#
+# 为什么是 Node 24：测试直接跑 .ts（node --test 走内置类型剥离），
+# 本地开发用的是 v24，CI 保持一致，免得两边对「能不能直接跑 .ts」判断不同。
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      # electron 只是打包期依赖，装二进制要下 100MB+，CI 里用不到。
+      - name: Install
+        run: pnpm install --frozen-lockfile
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+
+      - name: Typecheck
+        run: pnpm exec tsc --noEmit
+
+      - name: Test
+        run: node --test "test/**/*.test.ts"

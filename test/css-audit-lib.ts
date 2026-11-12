@@ -409,8 +409,16 @@ function hasDynamicResidue(skeleton: string): boolean {
     if (COMPARISONS.some((op) => after.startsWith(op))) continue
     if (COMPARISONS.some((op) => before.endsWith(op))) continue
     if (before.endsWith('!')) continue
-    // `cond && 'x'` / `cond || 'x'` 里的 cond 是布尔守卫，不是类名
-    if (after.startsWith('&&') || after.startsWith('||')) continue
+    /*
+     * 注意这里**不再**放过 `&&` / `||` 的左操作数。
+     *
+     * 以前把 `x && 'cls'` 里的 x 当成布尔守卫直接跳过，但静态层面根本证明不了
+     * x 是布尔 —— `styles.active && 'fallback'` 里的 styles.active 完全可能是个
+     * 字符串（空串为假、非空为真），那它本身就是类名来源。
+     * 规则改成：证明不了就是动态，一律 unresolved，禁止猜。
+     *
+     * 能证明为布尔的几种写法仍然放过：`!x`、`a === b`、`a > b` 等（见上面三条）。
+     */
 
     return true
   }
