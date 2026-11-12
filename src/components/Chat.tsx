@@ -51,7 +51,6 @@ import { SaveToWorkshopDialog, type SnippetDraft } from './SaveToWorkshop'
 import type { Attachment, ChatMessage, Settings, ThinkingEffort } from '../lib/types'
 import { CodeRunModal } from './CodeRunModal'
 import { CompressDialog } from './CompressDialog'
-import { NewChatSheet } from './NewChatSheet'
 import { SearchPanel } from './SearchPanel'
 import { MediaToolCard } from './MediaToolCard'
 import { SpeechButton } from './SpeechButton'
@@ -599,7 +598,6 @@ export function Chat() {
   const [exportOpen, setExportOpen] = useState(false)
   const [snippetDraft, setSnippetDraft] = useState<SnippetDraft | null>(null)
   const [searchOpen, setSearchOpen] = useState(false)
-  const [newChatOpen, setNewChatOpen] = useState(false)
   const [flashId, setFlashId] = useState<string | null>(null)
   const turns = useMemo(() => buildTurns(messages), [messages])
   const [activeAnchor, setActiveAnchor] = useState<string | null>(null)
@@ -1027,25 +1025,41 @@ export function Chat() {
     const text = input.trim()
     if ((text === '' && attachments.length === 0) || sending || preparing) return
     let accepted = false
+    /*
+     * 用户消息一旦「成功落库」就立刻清空输入框 —— 这是 UI 反馈 #4 的要点。
+     *
+     * 以前是等 `await sendMessage()` 返回后才清，而 sendMessage 内部要
+     * `await runAssistantTurn()`（整轮回复生成完才返回），于是「正在回应」的
+     * 整段时间里，输入框都还留着刚发出去的那句话（截图里那个「暂留」）。
+     *
+     * 现在改成 engine 在 accepted 那一刻回调 onAccepted。清空前再确认「输入框里
+     * 还是刚才那段」，避免把用户趁生成时新打的字一起抹掉（不做乐观清空，
+     * 失败也不需要回滚）。
+     */
+    const clearComposerIfUnchanged = (): void => {
+      if (inputRef.current !== null && inputRef.current.value.trim() === text) {
+        setInput('')
+        setAttachments([])
+        // 自己发的消息一定要看到：把「贴底」打开，否则用户之前往上翻过的话，
+        // 新消息会安静地落在下面看不见。
+        stickToBottom.current = true
+        requestAnimationFrame(resizeInput)
+      }
+    }
     try {
       // 群聊走 sendGroupMessage（一个接一个说）；单聊仍走 sendMessage。
       const active = useAppStore.getState().conversations.find((item) => item.id === useAppStore.getState().activeId)
       accepted = active?.kind === 'group'
-        ? await sendGroupMessage(text, attachments)
-        : await sendMessage(text, attachments)
+        ? await sendGroupMessage(text, attachments, { onAccepted: clearComposerIfUnchanged })
+        : await sendMessage(text, attachments, { onAccepted: clearComposerIfUnchanged })
     } catch (error) {
       // engine 内部已经用 finally 兜住了发送状态；这里只防「连兜底都抛了」的极端情况，
       // 至少要让用户知道这次没发出去，而不是看着输入框发呆。
       actions.showToast(error instanceof Error ? error.message : '没发出去，再试一次')
     }
-    if (accepted) {
-      setInput('')
-      setAttachments([])
-      // 自己发的消息一定要看到：把「贴底」打开，否则用户之前往上翻过的话，
-      // 新消息会安静地落在下面看不见。
-      stickToBottom.current = true
-      requestAnimationFrame(resizeInput)
-    }
+    // 兜底：本地指令 / 离线回复这类「即时成功」路径不走 onAccepted，
+    // 生成阶段很短，这里补一次；仍然只在输入框没被改过时才清。
+    if (accepted) clearComposerIfUnchanged()
   }
 
   function cycleSheet(): void {
@@ -1265,7 +1279,7 @@ export function Chat() {
             <IconButton label="历史对话" onClick={() => actions.setHistoryOpen(true)}>
               <History size={18} />
             </IconButton>
-            <IconButton label="新对话（可选群聊）" onClick={() => setNewChatOpen(true)}>
+            <IconButton label="新对话（可选群聊）" onClick={() => actions.setNewChatOpen(true)}>
               <Plus size={18} />
             </IconButton>
           </div>
@@ -1657,7 +1671,6 @@ export function Chat() {
         preselectIds={exportIds ?? undefined}
       />
       <SaveToWorkshopDialog draft={snippetDraft} onClose={() => setSnippetDraft(null)} />
-      <NewChatSheet open={newChatOpen} onClose={() => setNewChatOpen(false)} />
     </div>
   )
 }

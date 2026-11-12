@@ -99,6 +99,14 @@ interface AppState {
   previewVersion: number
   historyOpen: boolean
   /**
+   * 新建对话弹层（单聊 / 群聊）。
+   *
+   * 和 historyOpen 一样是纯瞬时 UI 状态，不落库。放到 store 而不是 Chat 本地，
+   * 是因为历史抽屉和历史页里的「+」也要能打开同一个弹层 —— 之前那两个入口
+   * 直接 createConversation()，绕过了单聊/群聊选择（UI 反馈 #2）。
+   */
+  newChatOpen: boolean
+  /**
    * 欣赏模式：藏起所有菜单，只看海。
    *
    * 纯瞬时 UI 状态，和 historyOpen 一样不落库 —— 下次启动该是正常的界面，
@@ -114,6 +122,8 @@ interface AppState {
     setScreen: (screen: Screen) => void
     setSheet: (sheet: SheetSize) => void
     setHistoryOpen: (open: boolean) => void
+    /** 打开 / 关闭「新建对话」弹层（单聊 / 群聊）。 */
+    setNewChatOpen: (open: boolean) => void
     /** 进出欣赏模式（只影响界面，不落库）。 */
     setZen: (on: boolean) => void
     setDraft: (draft: string) => void
@@ -231,6 +241,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   workspaceFiles: [],
   previewVersion: 0,
   historyOpen: false,
+  newChatOpen: false,
   zen: false,
   draft: '',
   actions: {
@@ -330,6 +341,9 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     setHistoryOpen(historyOpen) {
       set({ historyOpen })
+    },
+    setNewChatOpen(newChatOpen) {
+      set({ newChatOpen })
     },
 
     setZen(zen) {

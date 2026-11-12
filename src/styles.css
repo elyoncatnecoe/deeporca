@@ -4118,6 +4118,13 @@ button:disabled {
   gap: 2px;
 }
 
+/* 助手筛选：用自绘的 Select（src/components/ui.tsx），它的 .select-wrap 已是
+ * width:100% 且沿用 .field 的深色变量。这里只补一层外边距，避免贴边。
+ * 刻意不再用原生 <select>：安卓 WebView 的原生弹层不吃 color-scheme，会白屏。 */
+.drawer-filter {
+  padding: 8px 8px 0;
+}
+
 .drawer-list {
   flex: 1;
   overflow-y: auto;
@@ -5534,6 +5541,39 @@ textarea,
   border-color: rgba(255, 123, 123, 0.45);
   background: linear-gradient(135deg, #ff9b9b, #ff6f6f);
   color: #2a0707;
+}
+
+/*
+ * 危险操作按钮（记忆页「覆盖导入」「继续覆盖导入」）。
+ *
+ * 这两个按钮只写了 className="danger-button"，而 CSS 里从来没有这条规则，
+ * 于是它们退回浏览器默认按钮：`button { font: inherit }` 让字号跟住父级（不是 12px），
+ * 字重是默认的 400，内边距和圆角也和旁边的「添加导入」对不上 —— 摆在一起明显不是一套。
+ * 这里把排版完全对齐 .primary-button，只把配色换成危险色。
+ * 新加表单组件时务必同步写样式，test/css-class-audit.test.ts 会盯着。
+ */
+.danger-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border-radius: 11px;
+  font-size: 12px;
+  font-weight: 650;
+  padding: 8px 14px;
+  border: 1px solid rgba(255, 123, 123, 0.45);
+  background: linear-gradient(135deg, #ff9b9b, #ff6f6f);
+  color: #2a0707;
+}
+
+.danger-button:hover:not(:disabled) {
+  border-color: rgba(255, 123, 123, 0.7);
+  background: linear-gradient(135deg, #ffb0b0, #ff8686);
+}
+
+.danger-button:disabled {
+  opacity: 0.45;
+  filter: saturate(0.6);
 }
 /* ------------------------------------------------------- 启动失败提示 */
 
