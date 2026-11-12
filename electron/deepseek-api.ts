@@ -21,12 +21,20 @@
  * 协议参考 volcanicll/magpie-deepseek-web-auth（MIT）。
  */
 
-import { session as electronSession, app, type BrowserWindow } from 'electron'
+import { session as electronSession, app, safeStorage, type BrowserWindow } from 'electron'
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join, dirname, sep } from 'node:path'
 import { Worker } from 'node:worker_threads'
 import { PatchReader, iterSse } from './sse'
 import { powHeader, solvePow, type PowChallenge } from './pow'
+import {
+  captureSessionWith,
+  createSessionStore,
+  type CapturedSession,
+  type SessionPersistResult,
+  type WebSession,
+  type WebSessionIssue,
+} from './web-session'
 
 const CHAT_ORIGIN = 'https://chat.deepseek.com'
 const COMPLETION_PATH = '/api/v0/chat/completion'
@@ -50,11 +58,7 @@ function threadsFile(): string {
   return join(app.getPath('userData'), 'deepseek-web-threads.json')
 }
 
-export interface WebSession {
-  token: string
-  userAgent: string
-  savedAt: number
-}
+export type { WebSession, SessionPersistResult, WebSessionIssue } from './web-session'
 
 export class WebApiError extends Error {
   readonly kind: 'no-session' | 'expired' | 'http' | 'pow' | 'aborted' | 'network'
@@ -64,75 +68,57 @@ export class WebApiError extends Error {
   }
 }
 
-/* ------------------------------------------------------------------ */
-/* 登录态                                                              */
-/* ------------------------------------------------------------------ */
-
-let cachedSession: WebSession | null = null
+/**
+ * 登录态持久化。
+ *
+ * 逻辑全在 web-session.ts（那边可单测：写失败回滚内存、换账号失败让旧会话失效、
+ * 旧版明文迁移成功才替换）。这里只把真实的 safeStorage 与文件路径注入进去。
+ */
+const sessionStore = createSessionStore({
+  safe: {
+    isEncryptionAvailable: () => safeStorage.isEncryptionAvailable(),
+    encryptString: (plainText) => safeStorage.encryptString(plainText),
+    decryptString: (encrypted) => safeStorage.decryptString(encrypted),
+  },
+  file: sessionFile,
+})
 
 function loadSession(): WebSession | null {
-  if (cachedSession !== null) return cachedSession
-  try {
-    const parsed = JSON.parse(readFileSync(sessionFile(), 'utf8')) as WebSession
-    if (typeof parsed.token === 'string' && parsed.token !== '') cachedSession = parsed
-  } catch {
-    /* 没有存档是正常状态 */
-  }
-  return cachedSession
+  return sessionStore.load()
 }
 
-function saveSession(next: WebSession): void {
-  cachedSession = next
-  try {
-    mkdirSync(dirname(sessionFile()), { recursive: true })
-    writeFileSync(sessionFile(), JSON.stringify(next, null, 2), 'utf8')
-  } catch {
-    /* 写不进去就只用内存里的 */
-  }
+function saveSession(
+  next: WebSession,
+  options: { invalidateStale?: boolean } = {},
+): SessionPersistResult {
+  return sessionStore.save(next, options)
 }
 
 export function hasWebSession(): boolean {
-  return loadSession() !== null
+  return sessionStore.load() !== null
 }
 
 export function forgetWebSession(): void {
-  cachedSession = null
-  try {
-    writeFileSync(sessionFile(), '', 'utf8')
-  } catch {
-    /* 忽略 */
-  }
+  sessionStore.forget()
+}
+
+/** 取走一次待提示的会话问题（迁移失败 / 保存失败），取完即清。 */
+export function takeWebSessionIssue(): WebSessionIssue | null {
+  return sessionStore.takeIssue()
 }
 
 /* ------------------------------------------------------------------ */
 /* 从网页窗采集登录态                                                  */
 /* ------------------------------------------------------------------ */
 
-/** 网页把 token 存在 localStorage.userToken 里，形状是 {"value":"<TOKEN>"}。 */
-const READ_TOKEN_JS = `(() => {
-  try {
-    var raw = window.localStorage.getItem('userToken');
-    if (!raw) return null;
-    var o = JSON.parse(raw);
-    return (o && o.value) ? o.value : null;
-  } catch (e) { return null; }
-})()`
+/** 采集与保存的逻辑在 web-session.ts（那边不 import electron，可跑完整调用链测试）。 */
+export type { CapturedSession } from './web-session'
 
-export async function captureSessionFromWindow(win: BrowserWindow): Promise<WebSession | null> {
-  const token = await win.webContents
-    .executeJavaScript(READ_TOKEN_JS, true)
-    .catch(() => null) as string | null
-  if (token === null || token === '') return null
-  const userAgent = await win.webContents
-    .executeJavaScript('navigator.userAgent', true)
-    .catch(() => '') as string
-  const next: WebSession = {
-    token,
-    userAgent: userAgent !== '' ? userAgent : 'Mozilla/5.0',
-    savedAt: Date.now(),
-  }
-  saveSession(next)
-  return next
+export async function captureSessionFromWindow(win: BrowserWindow): Promise<CapturedSession | null> {
+  return await captureSessionWith(
+    (script) => win.webContents.executeJavaScript(script, true) as Promise<unknown>,
+    sessionStore,
+  )
 }
 
 /* ------------------------------------------------------------------ */
@@ -184,7 +170,21 @@ async function rawFetch(url: string, init: RequestInit): Promise<Response> {
  */
 function throwForAuth(response: Response): void {
   if (response.status === 401) {
-    forgetWebSession()
+    try {
+      forgetWebSession()
+    } catch (error) {
+      /*
+       * 登录确实过期了，但本地那份登录态文件没删掉。
+       *
+       * 不能吞掉这件事（否则用户重启又「登回去」），也不能用它掩盖「登录过期」
+       * 这个主错误 —— 所以合成一条：既说明要重新登录，也说明本地文件还在。
+       */
+      const detail = error instanceof Error ? error.message : String(error)
+      throw new WebApiError(
+        'expired',
+        `网页登录过期了，请重新登录一次（本地登录态文件未能清除：${detail}）`,
+      )
+    }
     throw new WebApiError('expired', '网页登录过期了，请重新登录一次')
   }
   if (response.status === 403) {

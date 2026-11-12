@@ -30,7 +30,7 @@ import { planGroupRound } from './group-chat'
 import { calendarToolDefinitions, isCalendarToolName, runCalendarTool } from './calendar-tools'
 import { mediaRefOf } from './media-store'
 import { currentProvider, isWebChatProvider } from './providers'
-import { webChatReady, loginWebChat, setWebChatContext } from './web-chat'
+import { webChatReady, loginWebChat, loginFailureToast, setWebChatContext } from './web-chat'
 import { buildWebChatContext } from './web-context'
 
 /**
@@ -248,7 +248,15 @@ export async function sendMessage(text: string, attachments: Attachment[] = []):
   if (isWebChatProvider(settings)) {
     const ready = await webChatReady()
     if (!ready) {
-      const login = await loginWebChat()
+      let login: { ok: boolean; message?: string }
+      try {
+        login = await loginWebChat()
+      } catch (error) {
+        // 登录链路可能以 IPC rejection 传回硬失败（例如「旧登录态清理失败」）。
+        // 这里必须让用户看到原因，而不是让异常冒到没人接的地方。
+        useAppStore.getState().actions.showToast(loginFailureToast(error))
+        return false
+      }
       if (!login.ok) {
         useAppStore.getState().actions.showToast(login.message ?? '网页账号还没登录；请在弹出的窗口里登录一次')
         return false

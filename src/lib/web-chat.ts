@@ -161,17 +161,50 @@ export async function loginWebChat(): Promise<{ ok: boolean; message?: string }>
 
   // 主进程负责「开窗 → 等用户登录 → 采集 → 验证 → 收窗」这一整套。
   if (native.webApiLogin !== undefined) {
-    const result = await native.webApiLogin()
-    if (!result.ok) return { ok: false, message: result.error ?? '登录没有完成' }
-    return { ok: true }
+    return mapLoginResponse(await native.webApiLogin())
   }
 
   // 没有 login 方法的老版本：开窗 + 采集两步走。
   if (native.webChatShow !== undefined) await native.webChatShow()
   if (native.webApiCapture === undefined) return { ok: true }
-  const captured = await native.webApiCapture()
-  if (!captured.ok) return { ok: false, message: captured.error ?? '采集登录态失败' }
-  return { ok: true }
+  return mapLoginResponse(await native.webApiCapture())
+}
+
+/**
+ * 主进程返回的登录结果 → 渲染层的登录结果。
+ *
+ * 单独抽出来是为了让「失败原因能不能一路传到 UI」这件事可以被测试覆盖：
+ * 主进程写的是 `error`，UI 读的是 `message`，中间这一步丢了就全白做。
+ */
+export function mapLoginResponse(result: { ok: boolean; error?: string }): { ok: boolean; message?: string } {
+  if (result.ok) return { ok: true }
+  return { ok: false, message: result.error ?? '登录没有完成' }
+}
+
+/**
+ * 登录结果 → 用户实际看到的提示文案。
+ *
+ * Settings 页直接用它，避免「成功/失败」两套措辞分散在两处、慢慢漂移。
+ */
+export function loginResultToast(result: { ok: boolean; message?: string }): string {
+  if (result.ok) return '网页账号已连接，以后不用再登录'
+  return result.message ?? '登录没有完成'
+}
+
+/**
+ * IPC **rejection** → 用户看到的提示。
+ *
+ * 主进程的「旧登录态清理失败」是抛异常走的 IPC rejection（不是结构化返回），
+ * 而 Electron 会在消息前面包一层 `Error invoking remote method 'webapi:login': ...`。
+ * 这里按锚点短语把它截出来，让用户看到干净的一句；认不出就原样给，至少不静默。
+ */
+export function loginFailureToast(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error)
+  const marker = '旧登录态清理失败'
+  const index = raw.indexOf(marker)
+  if (index >= 0) return raw.slice(index).trim()
+  const trimmed = raw.trim()
+  return trimmed === '' ? '登录流程出错' : trimmed
 }
 
 /** 等用户登录的上限（扫码、人机校验都需要时间）。 */
