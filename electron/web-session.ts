@@ -38,7 +38,48 @@ interface StoredSession {
  */
 export type SessionPersistResult =
   | { ok: true }
-  | { ok: false; reason: 'no-encryption' | 'write-failed'; message: string }
+  | {
+    ok: false
+    /**
+     * `stale-not-removed` 是单独的：写入失败了，而且盘上那份**旧会话也清不掉**。
+     * 这种情况必须让上层知道「重启后可能恢复旧账号」，不能报成普通的写入失败。
+     */
+    reason: 'no-encryption' | 'write-failed' | 'stale-not-removed'
+    message: string
+  }
+
+/** 删除登录态失败（既删不掉也截断不了）。 */
+export class SessionRemoveError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'SessionRemoveError'
+  }
+}
+
+/** 删除结果。 */
+export type SessionRemoveResult = { ok: true } | { ok: false; message: string }
+
+/**
+ * 文件操作的最小接口。
+ *
+ * 做成可注入的，是为了能测「删除失败」「读失败」这类分支 —— 真实文件系统上
+ * 很难稳定制造 EACCES / 占用，而这几条恰恰是最容易写成「静默吞掉」的地方。
+ */
+export interface SessionFsLike {
+  readFile: (file: string) => string
+  writeFile: (file: string, data: string) => void
+  rename: (from: string, to: string) => void
+  unlink: (file: string) => void
+  mkdirp: (dir: string) => void
+}
+
+const nodeFs: SessionFsLike = {
+  readFile: (target) => readFileSync(target, 'utf8'),
+  writeFile: (target, data) => writeFileSync(target, data, 'utf8'),
+  rename: (from, to) => renameSync(from, to),
+  unlink: (target) => unlinkSync(target),
+  mkdirp: (dir) => mkdirSync(dir, { recursive: true }),
+}
 
 /** 需要提示给用户、但当前 IPC 返回值里没有合适字段的会话问题。 */
 export interface WebSessionIssue {
@@ -50,6 +91,8 @@ export interface SessionStoreOptions {
   safe: SafeStorageLike
   /** 延迟取值：`app.getPath('userData')` 必须在 app ready 之后才可用。 */
   file: () => string
+  /** 可注入的文件操作（默认走真实 fs；测试用来模拟 EACCES / 占用等失败）。 */
+  fs?: SessionFsLike
 }
 
 export interface SessionStore {
@@ -70,6 +113,7 @@ function describeError(error: unknown): string {
 
 export function createSessionStore(options: SessionStoreOptions): SessionStore {
   const { safe, file } = options
+  const io = options.fs ?? nodeFs
   let cached: WebSession | null = null
   let pendingIssue: WebSessionIssue | null = null
 
@@ -105,7 +149,7 @@ export function createSessionStore(options: SessionStoreOptions): SessionStore {
    */
   const writeSealed = (next: WebSession, sealed: string): void => {
     const target = file()
-    mkdirSync(dirname(target), { recursive: true })
+    io.mkdirp(dirname(target))
     const payload: StoredSession = {
       token: sealed,
       userAgent: next.userAgent,
@@ -113,24 +157,36 @@ export function createSessionStore(options: SessionStoreOptions): SessionStore {
       sealed: true,
     }
     const tmp = `${target}.tmp`
-    writeFileSync(tmp, JSON.stringify(payload, null, 2), 'utf8')
-    renameSync(tmp, target)
+    io.writeFile(tmp, JSON.stringify(payload, null, 2))
+    io.rename(tmp, target)
   }
 
-  /** 删掉盘上的登录态文件（删不掉就退一步截断）。 */
-  const removeFile = (): void => {
+  /**
+   * 让盘上的登录态失效，并**如实报告结果**。
+   *
+   * 两级策略：
+   *   1. `unlink` 成功 → 文件没了，成功；
+   *   2. `unlink` 失败（非 ENOENT）→ 退一步写空文件。空文件下次启动解析失败，
+   *      会被当成「没有会话」，旧 token 不会被读回来，所以这也算成功；
+   *   3. 两级都失败 → **返回失败**，绝不再只是 `console.warn` 然后当没事发生。
+   */
+  const removeFile = (): SessionRemoveResult => {
     const target = file()
     try {
-      unlinkSync(target)
-      return
+      io.unlink(target)
+      return { ok: true }
     } catch (error) {
       // 本来就没有文件是正常状态。
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { ok: true }
     }
     try {
-      writeFileSync(target, '', 'utf8')
-    } catch {
-      console.warn('[web-session] 登录态文件既删不掉也写不动，可能仍留在磁盘上')
+      io.writeFile(target, '')
+      return { ok: true }
+    } catch (error) {
+      return {
+        ok: false,
+        message: `登录态文件既删不掉也写不动（${describeError(error)}）`,
+      }
     }
   }
 
@@ -151,14 +207,26 @@ export function createSessionStore(options: SessionStoreOptions): SessionStore {
     const previous = cached
 
     const fail = (reason: 'no-encryption' | 'write-failed', message: string): SessionPersistResult => {
-      if (saveOptions.invalidateStale === true) {
-        // 换账号失败：内存与磁盘一起回到「没有登录态」，避免旧账号被复活。
-        removeFile()
-        cached = null
-      } else {
+      if (saveOptions.invalidateStale !== true) {
         cached = previous
+        return { ok: false, reason, message }
       }
-      return { ok: false, reason, message }
+      // 换账号失败：必须让盘上的旧会话失效，否则重启会把旧账号复活。
+      const removed = removeFile()
+      if (removed.ok) {
+        cached = null
+        return { ok: false, reason, message }
+      }
+      /*
+       * 旧会话文件清不掉：**不能**清内存、也**不能**声称已清除。
+       * 保持上一份内存状态（它至少和磁盘一致），把「旧会话还在」这件事明确报上去。
+       */
+      cached = previous
+      return {
+        ok: false,
+        reason: 'stale-not-removed',
+        message: `${message}；且本地旧登录态文件未能清除（${removed.message}），重启后可能恢复旧账号`,
+      }
     }
 
     const sealed = sealToken(next.token)
@@ -179,7 +247,7 @@ export function createSessionStore(options: SessionStoreOptions): SessionStore {
 
     let parsed: StoredSession
     try {
-      parsed = JSON.parse(readFileSync(file(), 'utf8')) as StoredSession
+      parsed = JSON.parse(io.readFile(file())) as StoredSession
     } catch {
       // 没有存档 / 存档损坏：登录态本身可以重建（重新登录即可），不像 API Key 那样
       // 存在「一份还能恢复的密文」，所以这里当成没有登录态是安全的。
@@ -220,9 +288,18 @@ export function createSessionStore(options: SessionStoreOptions): SessionStore {
     return null
   }
 
+  /**
+   * 登出：让盘上的登录态失效。
+   *
+   * 删不掉时**抛错**，而且**不先清内存** —— 否则会出现「界面显示已登出、
+   * 磁盘上还留着 token、重启又登回去」的错位状态。
+   */
   const forget = (): void => {
+    const removed = removeFile()
+    if (!removed.ok) {
+      throw new SessionRemoveError(`${removed.message}，登录态可能仍留在磁盘上`)
+    }
     cached = null
-    removeFile()
   }
 
   const takeIssue = (): WebSessionIssue | null => {

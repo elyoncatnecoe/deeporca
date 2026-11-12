@@ -133,6 +133,34 @@ test('B5 读取失败不得伪装成「尚未配置 Key」', async () => {
   assert.equal(result.status, 'read-error', '暂时性读取失败必须报 read-error，不能报「没配置」')
 })
 
+test('B5b 读取失败 + 存在旧明文：必须立即 read-error，禁止进入迁移（不得覆盖 Keystore 凭证）', async () => {
+  const calls = { legacyGet: 0, pluginSet: 0, legacyRemove: 0 }
+  const deps = {
+    pluginGet: async (): Promise<string | null> => {
+      throw new Error('UserNotAuthenticatedException')
+    },
+    pluginSet: async (): Promise<void> => {
+      calls.pluginSet += 1
+    },
+    pluginRemove: async (): Promise<void> => {},
+    legacyGet: (): string | null => {
+      calls.legacyGet += 1
+      return 'sk-legacy-plain'
+    },
+    legacyRemove: (): void => {
+      calls.legacyRemove += 1
+    },
+  }
+
+  const result = await androidSecureGet(deps)
+
+  assert.equal(result.status, 'read-error')
+  assert.equal(result.value, null, '读失败时不能把旧明文当成当前凭证返回')
+  assert.equal(calls.legacyGet, 0, '读失败时不得读旧明文')
+  assert.equal(calls.pluginSet, 0, '读失败时不得写 Keystore（会覆盖可能仍有效的凭证）')
+  assert.equal(calls.legacyRemove, 0, '读失败时不得删旧明文')
+})
+
 test('B6 插件未注册 → unavailable（而不是 read-error）', async () => {
   const { deps } = makeDeps({
     pluginGet: async () => {

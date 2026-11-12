@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -15,6 +15,7 @@ import {
   removeSecureValue,
   writeSecureValue,
   type SafeStorageLike,
+  type SecureStoreFsLike,
 } from '../electron/secure-store.ts'
 
 /**
@@ -220,12 +221,64 @@ test('A12 结构不合法（数组 / 值不是字符串）必须抛错', () => {
   }
 })
 
-test('A13 读取异常（无权限 / IO 错误）必须抛错，不能被当成空存储', () => {
+test('A13 权限不足（EACCES）必须包装成 SecureStoreReadError 抛出，不得变成 {}', () => {
   const { file, cleanup } = tempSecureFile()
   try {
-    // 用目录冒充文件：readFileSync 会抛 EISDIR，等价于「读失败」这一类错误。
-    mkdirSync(file, { recursive: true })
-    assert.throws(() => readSecureStoreFile(file), SecureStoreReadError)
+    // 注入一个「读一定失败」的文件层，精确模拟权限不足。
+    // 不用目录冒充文件（EISDIR）—— 那只能证明「文件类型不对」，证明不了权限问题。
+    const writes: string[] = []
+    const eaccesFs: SecureStoreFsLike = {
+      readFile: () => {
+        const error = new Error('EACCES: permission denied, open \'secure.json\'') as NodeJS.ErrnoException
+        error.code = 'EACCES'
+        throw error
+      },
+      writeFile: (_target, data) => {
+        writes.push(data)
+      },
+      mkdirp: () => undefined,
+    }
+
+    assert.throws(
+      () => readSecureStoreFile(file, eaccesFs),
+      (error: unknown) => {
+        assert.ok(error instanceof SecureStoreReadError, '必须是 SecureStoreReadError')
+        assert.match((error as Error).message, /EACCES/, '错误信息要保留 EACCES')
+        return true
+      },
+    )
+
+    // 整条读取链路也必须抛，而不是返回空表。
+    assert.throws(() => readSecureValue(fakeSafe(), file, eaccesFs), SecureStoreReadError)
+    assert.deepEqual(writes, [], '读取失败不得触发任何写入')
+  } finally {
+    cleanup()
+  }
+})
+
+test('A13b 权限不足时写入/删除都不得发生（不会覆盖原文件）', () => {
+  const { file, cleanup } = tempSecureFile()
+  try {
+    const original = '{"apiKey":"enc:keep-me"}'
+    writeFileSync(file, original, 'utf8')
+
+    const writes: string[] = []
+    const eaccesFs: SecureStoreFsLike = {
+      readFile: () => {
+        const error = new Error('EACCES: permission denied') as NodeJS.ErrnoException
+        error.code = 'EACCES'
+        throw error
+      },
+      writeFile: (_target, data) => {
+        writes.push(data)
+      },
+      mkdirp: () => undefined,
+    }
+
+    assert.throws(() => writeSecureValue(fakeSafe(), file, 'sk-new', eaccesFs), SecureStoreReadError)
+    assert.throws(() => removeSecureValue(file, eaccesFs), SecureStoreReadError)
+    assert.deepEqual(writes, [], '读不出来就不该写，否则会覆盖原凭证')
+    assert.equal(readFileSync(file, 'utf8'), original, '真实文件必须原样保留')
   } finally {
     cleanup()
   }

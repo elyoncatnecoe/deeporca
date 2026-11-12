@@ -49,23 +49,35 @@ export function classifyPluginError(error: unknown): SecureStorageStatus {
 /**
  * 读取凭证。
  *
- * 顺序：插件 → 旧版明文迁移。任何一步失败都**不会**返回「就是没配置」这个结论，
- * 除非插件明确正常且旧版也没有残留。
+ * 三种结果必须分开处理：
+ *   1. 插件成功返回**有效值** → 直接用；
+ *   2. 插件成功返回 `null`/空 → 才允许去检查并迁移旧版 localStorage 明文；
+ *   3. 插件**抛异常**（`UserNotAuthenticatedException` 等）→ 立即返回失败状态，
+ *      **绝不进入迁移流程**。
+ *
+ * 第 3 条是红线：读失败说明 Keystore 里可能还有一份有效凭证，只是这次读不出来。
+ * 这时候去读 localStorage、再 `pluginSet` 一次，等于用一份旧明文覆盖掉那份凭证；
+ * 更糟的是删掉旧明文之后，两边都没了。
  */
 export async function androidSecureGet(deps: AndroidSecureDeps): Promise<AndroidSecureReadResult> {
-  let pluginStatus: SecureStorageStatus | null = null
+  let pluginValue: string | null
   try {
-    const value = await deps.pluginGet()
-    if (typeof value === 'string' && value !== '') return { value, status: 'available' }
+    pluginValue = await deps.pluginGet()
   } catch (error) {
-    pluginStatus = classifyPluginError(error)
+    // 读失败：不碰 legacyGet / pluginSet / legacyRemove，如实上报。
+    // 注意这里**不返回 available**：那会被上层当成「用户还没配置」。
+    return { value: null, status: classifyPluginError(error) }
   }
 
-  // 插件里没有值（或读失败）：看看旧版降级路径有没有留下明文。
+  if (typeof pluginValue === 'string' && pluginValue !== '') {
+    return { value: pluginValue, status: 'available' }
+  }
+
+  // 走到这里说明插件**明确成功且没有值**，这时才允许检查旧版明文。
   const legacy = deps.legacyGet()
   if (legacy === null || legacy === '') {
-    // 没有任何旧值可救。插件读失败时如实报告失败，不谎称「尚未配置」。
-    return { value: null, status: pluginStatus ?? 'available' }
+    // 确实没有旧值：这才是真的「尚未配置」。
+    return { value: null, status: 'available' }
   }
 
   // 有旧值：尝试搬进 Keystore。

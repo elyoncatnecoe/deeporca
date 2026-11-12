@@ -2,10 +2,18 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-import { createSessionStore, type WebSession } from '../electron/web-session.ts'
+import {
+  SessionRemoveError,
+  createSessionStore,
+  type SessionFsLike,
+  type WebSession,
+} from '../electron/web-session.ts'
 import type { SafeStorageLike } from '../electron/secure-store.ts'
+
+const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 /**
  * 网页登录态的持久化（修复 2）。
@@ -210,4 +218,93 @@ test('S10 没有存档 = 未登录（正常状态，不产生问题提示）', (
   } finally {
     cleanup()
   }
+})
+
+/* ------------------------------------------------------------------ */
+/* 修复 P1-2：删除失败不得静默吞掉                                       */
+/* ------------------------------------------------------------------ */
+
+/** 可切换失败模式的假文件层（真实 fs 上很难稳定造出 EACCES / 占用）。 */
+function statefulFs(state: { failWrites: boolean; failUnlink: boolean }): SessionFsLike {
+  const err = (code: string): NodeJS.ErrnoException => {
+    const error = new Error(`${code}: simulated`) as NodeJS.ErrnoException
+    error.code = code
+    return error
+  }
+  return {
+    readFile: () => {
+      throw err('ENOENT')
+    },
+    writeFile: () => {
+      if (state.failWrites) throw err('EACCES')
+    },
+    rename: () => {
+      if (state.failWrites) throw err('EACCES')
+    },
+    unlink: () => {
+      if (state.failUnlink) throw err('EPERM')
+    },
+    mkdirp: () => undefined,
+  }
+}
+
+test('S11 换账号写失败且旧会话清不掉：必须报 stale-not-removed，且不得清空内存', () => {
+  const { file, cleanup } = tempSessionFile()
+  try {
+    const state = { failWrites: false, failUnlink: false }
+    const store = createSessionStore({ safe: fakeSafe(), file: () => file, fs: statefulFs(state) })
+    assert.deepEqual(store.save(SESSION_A), { ok: true })
+
+    state.failWrites = true
+    state.failUnlink = true
+    const result = store.save(SESSION_B, { invalidateStale: true })
+
+    assert.equal(result.ok, false)
+    if (!result.ok) {
+      assert.equal(result.reason, 'stale-not-removed', '不能报成普通写入失败')
+      assert.match(result.message, /未能清除/)
+      assert.match(result.message, /重启后可能恢复旧账号/)
+    }
+    assert.equal(store.peek()?.token, SESSION_A.token, '旧会话还在时不能清内存、更不能声称已清除')
+  } finally {
+    cleanup()
+  }
+})
+
+test('S12 forget 删除失败：必须抛 SessionRemoveError，且内存保持原样', () => {
+  const { file, cleanup } = tempSessionFile()
+  try {
+    const state = { failWrites: false, failUnlink: false }
+    const store = createSessionStore({ safe: fakeSafe(), file: () => file, fs: statefulFs(state) })
+    store.save(SESSION_A)
+
+    state.failWrites = true
+    state.failUnlink = true
+    assert.throws(() => store.forget(), SessionRemoveError)
+
+    assert.equal(store.peek()?.token, SESSION_A.token, '删不掉就不能显示已登出')
+  } finally {
+    cleanup()
+  }
+})
+
+test('S13 unlink 失败但截断成功：视为旧会话已失效，forget 成功', () => {
+  const { file, cleanup } = tempSessionFile()
+  try {
+    const state = { failWrites: false, failUnlink: true }
+    const store = createSessionStore({ safe: fakeSafe(), file: () => file, fs: statefulFs(state) })
+    store.save(SESSION_A)
+
+    assert.doesNotThrow(() => store.forget(), '空文件策略下旧 token 不会被读回，可视为成功')
+    assert.equal(store.peek(), null)
+  } finally {
+    cleanup()
+  }
+})
+
+test('S14 结构断言：调用链不会把「旧会话未清除」报成「已清除」', () => {
+  const main = readFileSync(join(root, 'electron/main.ts'), 'utf8')
+  assert.match(main, /stale-not-removed/, 'main.ts 必须识别旧会话未清除这一分支')
+  assert.match(main, /persistFailureText/, '登录失败文案必须走统一出口')
+  assert.match(main, /重启后可能恢复旧账号/, '必须如实提示后果')
 })

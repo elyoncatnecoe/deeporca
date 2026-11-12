@@ -25,10 +25,28 @@ import {
   verifySession,
   uploadWebFile,
   webSend,
+  type SessionPersistResult,
 } from './deepseek-api'
 
 /** 等用户登录最多等这么久（扫码/人机校验都需要时间）。 */
 const LOGIN_TIMEOUT_MS = 300_000
+
+/**
+ * 把「登录态没存下来」翻译成给用户看的一句话。
+ *
+ * 关键点：如果盘上的旧会话也没清掉，**绝不能说「已清除」** —— 那会让用户以为
+ * 重启后是干净状态，实际却会回到旧账号。
+ */
+function persistFailureText(result: Extract<SessionPersistResult, { ok: false }>): string {
+  if (result.reason === 'stale-not-removed') return result.message
+  try {
+    forgetWebSession()
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    return `${result.message}；且本地旧登录态未能清除（${detail}），重启后可能恢复旧账号`
+  }
+  return `${result.message}；为避免下次启动恢复旧账号，本地登录态已清除`
+}
 
 /**
  * 测试/自动化用：指定独立的 userData 目录，起一个「新装」实例。
@@ -819,14 +837,10 @@ if (!singleInstance) {
       while (Date.now() < deadline) {
         const captured = await captureSessionFromWindow(win)
         if (captured !== null) {
-          // 存不下来就别假装登录成功：内存已经回滚、盘上的旧会话也已失效，
-          // 这里如实告诉用户原因，否则重启后会莫名其妙回到旧账号。
+          // 存不下来就别假装登录成功：内存已经回滚，这里如实告诉用户原因，
+          // 否则重启后会莫名其妙回到旧账号。
           if (!captured.persist.ok) {
-            forgetWebSession()
-            return {
-              ok: false,
-              error: `${captured.persist.message}；为避免下次启动恢复旧账号，本地登录态已清除`,
-            }
+            return { ok: false, error: persistFailureText(captured.persist) }
           }
           // 验证 token 真的能用，避免存下一个过期的登录态。
           const verified = await verifySession()
@@ -875,16 +889,17 @@ if (!singleInstance) {
       const captured = await captureSessionFromWindow(win)
       if (captured === null) return { ok: false, error: '还没登录：窗口里没有 userToken' }
       if (!captured.persist.ok) {
-        forgetWebSession()
-        return {
-          ok: false,
-          error: `${captured.persist.message}；为避免下次启动恢复旧账号，本地登录态已清除`,
-        }
+        return { ok: false, error: persistFailureText(captured.persist) }
       }
       return { ok: true }
     })
 
-    /** 忘掉登录态（登出/过期后重新引导）。 */
+    /**
+     * 忘掉登录态（登出/过期后重新引导）。
+     *
+     * 删除失败**不吞**：直接让 IPC 以 rejection 返回，调用方必须处理。
+     * 这里绝不返回「已清除」之类的成功信号。
+     */
     trustedHandle('webapi:forget', () => {
       forgetWebSession()
     })

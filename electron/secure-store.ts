@@ -53,6 +53,24 @@ export interface SecureReadResult {
 /** 凭证文件里我们用到的槽位名。 */
 export const API_KEY_SLOT = 'apiKey'
 
+/**
+ * 文件操作的最小接口。
+ *
+ * 做成可注入的，是为了能真实模拟 `EACCES`（权限不足）这类失败 —— 在 Windows 上
+ * 靠改 ACL 造权限错误既不稳定也不可重复，而这条恰恰是最容易被写成「吞成空表」的。
+ */
+export interface SecureStoreFsLike {
+  readFile: (file: string) => string
+  writeFile: (file: string, data: string) => void
+  mkdirp: (dir: string) => void
+}
+
+const nodeFs: SecureStoreFsLike = {
+  readFile: (file) => readFileSync(file, 'utf8'),
+  writeFile: (file, data) => writeFileSync(file, data, 'utf8'),
+  mkdirp: (dir) => mkdirSync(dir, { recursive: true }),
+}
+
 const ENC_PREFIX = 'enc:'
 const RAW_PREFIX = 'raw:'
 
@@ -130,10 +148,10 @@ export function readSecureEntry(safe: SafeStorageLike, store: Record<string, str
  * 第 3 种绝不能返回 `{}`：那等于告诉上层「用户没配过 Key」，于是一次普通的
  * 保存设置就会把盘上那份可能还能恢复的密文覆盖掉。
  */
-export function readSecureStoreFile(file: string): Record<string, string> {
+export function readSecureStoreFile(file: string, fs: SecureStoreFsLike = nodeFs): Record<string, string> {
   let text: string
   try {
-    text = readFileSync(file, 'utf8')
+    text = fs.readFile(file)
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code
     // 只有「确实不存在」才算正常的空存储。
@@ -162,9 +180,13 @@ export function readSecureStoreFile(file: string): Record<string, string> {
   return store
 }
 
-export function writeSecureStoreFile(file: string, store: Record<string, string>): void {
-  mkdirSync(dirname(file), { recursive: true })
-  writeFileSync(file, JSON.stringify(store), 'utf8')
+export function writeSecureStoreFile(
+  file: string,
+  store: Record<string, string>,
+  fs: SecureStoreFsLike = nodeFs,
+): void {
+  fs.mkdirp(dirname(file))
+  fs.writeFile(file, JSON.stringify(store))
 }
 
 /**
@@ -173,14 +195,18 @@ export function writeSecureStoreFile(file: string, store: Record<string, string>
  * 这是 `secure:get` 的完整实现，测试直接打这里 —— 避免测试里再抄一份
  * 「先加密再写」的顺序，抄的那份永远不会发现顺序被改错。
  */
-export function readSecureValue(safe: SafeStorageLike, file: string): SecureReadResult {
+export function readSecureValue(
+  safe: SafeStorageLike,
+  file: string,
+  fs: SecureStoreFsLike = nodeFs,
+): SecureReadResult {
   // 读不出来就抛（→ 上层 read-error），绝不在这里吞成空表。
-  const store = readSecureStoreFile(file)
+  const store = readSecureStoreFile(file, fs)
   const result = readSecureEntry(safe, store)
   if (result.needsMigration && result.value !== null) {
     try {
       store[API_KEY_SLOT] = encryptValue(safe, result.value)
-      writeSecureStoreFile(file, store)
+      writeSecureStoreFile(file, store, fs)
     } catch (error) {
       // 升级失败不静默：本次仍可用内存里的明文值，但必须留下痕迹，下次启动再试。
       console.warn('[secure-store] 旧版 raw: 凭证升级失败，本次仍可继续使用', error)
@@ -195,15 +221,20 @@ export function readSecureValue(safe: SafeStorageLike, file: string): SecureRead
  * **加密在写盘之前**：加密不可用时 `encryptValue` 直接抛错，函数在 `writeSecureStoreFile`
  * 之前就退出，所以原文件一个字节都不会变（这是「失败不得清空原凭证」的实现基础）。
  */
-export function writeSecureValue(safe: SafeStorageLike, file: string, value: string): void {
-  const store = readSecureStoreFile(file)
+export function writeSecureValue(
+  safe: SafeStorageLike,
+  file: string,
+  value: string,
+  fs: SecureStoreFsLike = nodeFs,
+): void {
+  const store = readSecureStoreFile(file, fs)
   store[API_KEY_SLOT] = encryptValue(safe, value)
-  writeSecureStoreFile(file, store)
+  writeSecureStoreFile(file, store, fs)
 }
 
 /** 删除凭证。 */
-export function removeSecureValue(file: string): void {
-  const store = readSecureStoreFile(file)
+export function removeSecureValue(file: string, fs: SecureStoreFsLike = nodeFs): void {
+  const store = readSecureStoreFile(file, fs)
   delete store[API_KEY_SLOT]
-  writeSecureStoreFile(file, store)
+  writeSecureStoreFile(file, store, fs)
 }

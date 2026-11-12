@@ -193,7 +193,21 @@ async function rawFetch(url: string, init: RequestInit): Promise<Response> {
  */
 function throwForAuth(response: Response): void {
   if (response.status === 401) {
-    forgetWebSession()
+    try {
+      forgetWebSession()
+    } catch (error) {
+      /*
+       * 登录确实过期了，但本地那份登录态文件没删掉。
+       *
+       * 不能吞掉这件事（否则用户重启又「登回去」），也不能用它掩盖「登录过期」
+       * 这个主错误 —— 所以合成一条：既说明要重新登录，也说明本地文件还在。
+       */
+      const detail = error instanceof Error ? error.message : String(error)
+      throw new WebApiError(
+        'expired',
+        `网页登录过期了，请重新登录一次（本地登录态文件未能清除：${detail}）`,
+      )
+    }
     throw new WebApiError('expired', '网页登录过期了，请重新登录一次')
   }
   if (response.status === 403) {
