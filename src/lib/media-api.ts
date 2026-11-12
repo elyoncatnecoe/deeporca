@@ -1,5 +1,5 @@
 import { netRequest, netRequestBinary, netStream, NetError } from './net.ts'
-import { dataUrlOf, parseDataUrl } from './media-store.ts'
+import { dataUrlOf, estimateDataUrlBytes, MAX_IMAGE_BYTES, mediaWithinLimit, parseDataUrl } from './media-store.ts'
 import type { ImageApiConfig, SpeechApiConfig } from './types'
 
 /**
@@ -492,6 +492,9 @@ async function generateImageOpenAi(
   return images.slice(0, count)
 }
 
+/** 一次生图最多带几张参考图。再多，请求体就只是白等一次超时。 */
+const MAX_REFERENCE_IMAGES = 4
+
 /** 生图入口：按协议分派。 */
 export async function generateImages(
   config: ImageApiConfig,
@@ -500,7 +503,37 @@ export async function generateImages(
 ): Promise<GeneratedImage[]> {
   if (request.prompt.trim() === '') throw new MediaApiError(400, '提示词不能为空')
   if (request.prompt.length > 4000) throw new MediaApiError(400, '提示词太长（最多 4000 字）')
-  const cleanReferences = (request.referenceImages ?? []).filter((url) => parseDataUrl(url) !== null)
+  /*
+   * 参考图要过两道闸（T-19）：张数 ≤ 4、总量 ≤ 单张上限。
+   *
+   * 参考图是**内联**进请求体的：四张 16MB 的图拼起来就是 60MB+ 的 JSON，还要经
+   * IPC 再复制一次，发出去之前基本就注定超时。以前这里只判「能不能 parse」，
+   * 张数和体积完全不看，等于没设防。
+   */
+  const pickedReferences: string[] = []
+  let referenceBytes = 0
+  let droppedForSize = 0
+  for (const url of request.referenceImages ?? []) {
+    if (pickedReferences.length >= MAX_REFERENCE_IMAGES) break
+    if (parseDataUrl(url) === null) continue
+    if (!mediaWithinLimit('image', url)) {
+      droppedForSize += 1
+      continue
+    }
+    const bytes = estimateDataUrlBytes(url)
+    if (referenceBytes + bytes > MAX_IMAGE_BYTES) {
+      droppedForSize += 1
+      continue
+    }
+    referenceBytes += bytes
+    pickedReferences.push(url)
+  }
+  // 只因为「太大」才一张都不剩时说清楚；本来就不是 data URL 的照旧静默忽略。
+  if (pickedReferences.length === 0 && droppedForSize > 0) {
+    const limitMb = Math.round(MAX_IMAGE_BYTES / (1024 * 1024))
+    throw new MediaApiError(400, `参考图太大（单张上限 ${limitMb}MB），请压缩后再试`)
+  }
+  const cleanReferences = pickedReferences
   const normalized: ImageGenerationRequest = {
     ...request,
     prompt: request.prompt.trim(),
@@ -899,6 +932,12 @@ async function synthesizeSpeechOpenRouter(
     // 个别网关按「整段 base64 的子串」分片，单独一段解不开；拼起来再解。
     bytes = decodeBase64ToBytes(audioData.join(''))
   }
+  /*
+   * 到这里 raw（整段响应原文）和 audioData（每片 base64）就没用了，而它们加起来
+   * 通常比最终音频还大。显式放掉，别让它们陪着 dataUrl 一起常驻（T-20）。
+   */
+  raw = ''
+  audioData.length = 0
   return { dataUrl: dataUrlOf(audioMime(config.format), bytesToBase64(bytes)), mime: audioMime(config.format) }
 }
 

@@ -485,3 +485,108 @@ test('T-16：同一批多张图前 80 个 base64 字符相同，不能被当成�
     restore()
   }
 })
+
+/* ------------------------------------------- 批次 3 · C 组（T-19 / T-20） */
+
+/**
+ * 一段解码后超过 16MB 的 base64。
+ *
+ * mediaWithinLimit 判的是**解码后字节**，所以 base64 长度要超过 16MB × 4/3 ≈ 22.4MB。
+ * 这个字符串只在用到它的两条用例里才分配（懒加载），别拖慢其它用例。
+ */
+let oversizedBase64Cache: string | undefined
+function oversizedImageBase64(): string {
+  oversizedBase64Cache ??= 'A'.repeat(24 * 1024 * 1024)
+  return oversizedBase64Cache
+}
+
+test('T-19：超过 16MB 的生成图不进 media，也不落库', async () => {
+  const restore = stubFetch(async () => new Response(JSON.stringify({
+    predictions: [{ bytesBase64Encoded: oversizedImageBase64(), mimeType: 'image/png' }],
+  }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+  try {
+    const outcome = await runMediaTool(GENERATE_IMAGE_TOOL_NAME, '{"prompt":"一只猫"}', {
+      settings: settingsWith(imageConfig({
+        protocol: 'gemini',
+        baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
+        model: 'imagen-3.0-generate-002',
+      })),
+      conversationId: 'c1',
+      referenceImages: [],
+    })
+    // 用 length 而不是 deepEqual([])：失败时不要把 25MB 的 data URL 打进日志。
+    assert.equal(outcome.media.length, 0, '超限的图仍然被交给 engine 写库了')
+    assert.match(outcome.resultText, /太大/)
+  } finally {
+    restore()
+  }
+})
+
+test('T-19：超过 12MB 的语音不进 media', async () => {
+  // 13MB 字节 → base64 约 17.3MB，超过 MAX_AUDIO_BYTES（12MB）。
+  const audioBytes = 13 * 1024 * 1024
+  const chunk = Buffer.alloc(audioBytes, 0x41).toString('base64')
+  const encoder = new TextEncoder()
+  const restore = stubFetch(async () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { audio: { data: chunk } } }] })}\n\n`))
+        controller.enqueue(encoder.encode('data: [DONE]\n\n'))
+        controller.close()
+      },
+    })
+    return new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
+  })
+  try {
+    const outcome = await runMediaTool(SPEAK_TOOL_NAME, '{"text":"很长的一段话"}', {
+      settings: settingsWith(undefined, speechConfig()),
+      conversationId: 'c1',
+      referenceImages: [],
+    })
+    assert.equal(outcome.media.length, 0, '超限的语音仍然被交给 engine 写库了')
+    assert.match(outcome.resultText, /太长/)
+  } finally {
+    restore()
+  }
+})
+
+test('T-19：参考图最多带 4 张，多出来的不进请求体', async () => {
+  const calls: Array<{ body: Record<string, unknown> }> = []
+  const restore = stubFetch(async (_url, init) => {
+    calls.push({ body: JSON.parse(String(init.body)) as Record<string, unknown> })
+    return new Response(JSON.stringify({ data: [{ b64_json: TINY_PNG }] }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  })
+  try {
+    const references = [1, 2, 3, 4, 5, 6].map((index) => dataUrlOf('image/png', Buffer.from([index]).toString('base64')))
+    await generateImages(imageConfig(), { prompt: '参考这几张', referenceImages: references })
+    const sent = calls[0]?.body.input_references as unknown[]
+    assert.ok(Array.isArray(sent))
+    assert.equal(sent.length, 4, '参考图没有按 4 张截断，请求体白涨一倍')
+  } finally {
+    restore()
+  }
+})
+
+test('T-19：参考图超过 16MB 时直接说清楚，而不是偷偷不带图去生成', async () => {
+  const restore = stubFetch(async () => {
+    throw new Error('不该发请求：体积闸门在发请求之前就该拦下')
+  })
+  try {
+    await assert.rejects(
+      () => generateImages(imageConfig(), {
+        prompt: '参考这张',
+        referenceImages: [dataUrlOf('image/png', oversizedImageBase64())],
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof MediaApiError)
+        assert.match(error.message, /参考图太大/)
+        return true
+      },
+    )
+  } finally {
+    restore()
+  }
+})
