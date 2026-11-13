@@ -158,6 +158,44 @@ test('T-10：正常 SSE 不会被收尾逻辑重复解析（正文不翻倍）',
   }
 })
 
+/* ------------------------------------------- SSE 规范（P0 对齐 chat-demo） */
+
+test('SSE：CR-only 换行也要能解析出正文（旧实现只认 \\n / \\r\\n）', async () => {
+  const stub = stubFetch([sse(['data: {"choices":[{"delta":{"content":"甲"}}]}\r\r'])])
+  try {
+    const result = await streamChat({ settings: settingsFor(providerFor()), messages: [USER] })
+    assert.equal(result.content, '甲')
+  } finally {
+    stub.restore()
+  }
+})
+
+test('SSE：多行 data 要拼成一个合法 JSON 事件', async () => {
+  const stub = stubFetch([sse(['data: {"choices":\ndata: [{"delta":{"content":"多行"}}]}\n\n'])])
+  try {
+    const result = await streamChat({ settings: settingsFor(providerFor()), messages: [USER] })
+    assert.equal(result.content, '多行')
+  } finally {
+    stub.restore()
+  }
+})
+
+test('SSE：event: error 的纯文本错误帧不能被吞掉（否则请求挂到超时）', async () => {
+  const stub = stubFetch([sse(['event: error\ndata: 等待生成超时\n\n'])])
+  try {
+    await assert.rejects(
+      () => streamChat({ settings: settingsFor(providerFor()), messages: [USER] }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error)
+        assert.match((error as Error).message, /等待生成超时/)
+        return true
+      },
+    )
+  } finally {
+    stub.restore()
+  }
+})
+
 /* ------------------------------------------------------------------ T-11 */
 
 test('T-11：网关嫌 stream_options 时，重试的请求体里必须真的没有这个字段', async () => {

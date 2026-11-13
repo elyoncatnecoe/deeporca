@@ -2,14 +2,19 @@ import { useEffect, useMemo, useRef } from 'react'
 import hljs from 'highlight.js/lib/common'
 import { decodeCode, renderMarkdown } from '../lib/markdown'
 import { useAppStore } from '../lib/store'
+import { useThrottleMarkdownRender } from './useThrottleMarkdownRender'
 
 export function Markdown(props: {
   text: string
+  /** 正在流式输出：按渲染耗时节流，避免每个 token 全量重排（低端机掉帧）。 */
+  streaming?: boolean
   onRun?: (code: string, lang: string) => void
   onSave?: (code: string, lang: string) => void
 }) {
   const ref = useRef<HTMLDivElement | null>(null)
-  const html = useMemo(() => renderMarkdown(props.text), [props.text])
+  // 非流式（历史消息）时 hook 直接返回最新 text，行为与以前完全一致。
+  const shown = useThrottleMarkdownRender(props.text, props.streaming === true)
+  const html = useMemo(() => renderMarkdown(shown), [shown])
 
   useEffect(() => {
     const root = ref.current

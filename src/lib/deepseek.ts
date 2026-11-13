@@ -15,6 +15,7 @@ import {
   parseGoogleEvent,
   type ToolDraft,
 } from './protocols'
+import { SseDecoder } from './sse'
 
 export class ApiError extends Error {
   readonly status: number
@@ -266,7 +267,8 @@ export async function streamChat(options: {
   let finishReason: string | undefined
   let usage: TokenUsage | undefined
   const toolDrafts = new Map<number, ToolAccumulator>()
-  let buffer = ''
+  // SSE 解码器（规范实现，见 sse.ts）。以前这里是一个手写的 buffer + /\r?\n\r?\n/ 切分。
+  const sseDecoder = new SseDecoder()
   /**
    * 这一轮到底解析出过事件没有。
    *
@@ -388,21 +390,18 @@ export async function streamChat(options: {
 
   /** 把一段原始文本喂给 SSE 解析器；返回 true 表示收到 [DONE]。 */
   const consume = (chunk: string): boolean => {
-    buffer += chunk
-    while (true) {
-      const separator = /\r?\n\r?\n/.exec(buffer)
-      if (separator === null) break
-      const rawEvent = buffer.slice(0, separator.index)
-      buffer = buffer.slice(separator.index + separator[0].length)
-      const payload = rawEvent
-        .split(/\r?\n/)
-        .filter((line) => line.startsWith('data:'))
-        .map((line) => line.slice(5).trimStart())
-        .join('\n')
-      if (payload !== '') {
-        // 见到任何一个事件（含 [DONE]）就说明网关确实在按 SSE 说话。
-        sawPayload = true
-        if (handlePayload(payload)) return true
+    for (const event of sseDecoder.push(chunk)) {
+      if (event.data === '') continue
+      // 见到任何一个带 data 的事件（含 [DONE]）就说明网关确实在按 SSE 说话。
+      sawPayload = true
+      if (handlePayload(event.data)) return true
+      /*
+       * 带 `event: error` 的帧：data 可能是 JSON 错误体（handlePayload 会抛），
+       * 也可能是纯文本（如「等待生成超时」）。以前只取 data: 行、JSON 解析失败就
+       * 静默丢掉，于是这类错误帧被吞，请求一直挂到超时。现在把它当错误抛出去。
+       */
+      if (event.event === 'error') {
+        throw new Error(event.data)
       }
     }
     return false
@@ -414,7 +413,7 @@ export async function streamChat(options: {
     finishReason = undefined
     usage = undefined
     toolDrafts.clear()
-    buffer = ''
+    sseDecoder.reset()
     sawPayload = false
   }
 
@@ -462,11 +461,11 @@ export async function streamChat(options: {
     /*
      * 收尾 flush（T-10）：最后一个事件经常没有以空行结尾。
      *
-     * consume 只在空行处分事件，所以只要网关最后一段没跟着 \r\n\r\n，那段就永远留在
-     * buffer 里被丢掉 —— 丢的往往正是 usage 或最后一段正文（[DONE] 后面不带空行的
+     * 解码器只在空行处分事件，所以只要网关最后一段没跟着 \r\n\r\n，那段就永远留在
+     * pending 里被丢掉 —— 丢的往往正是 usage 或最后一段正文（[DONE] 后面不带空行的
      * 网关很常见）。media-api.ts 一直有这么一次收尾，这边以前漏了。
      */
-    if (!sawErrorStatus && !done && buffer.trim() !== '') {
+    if (!sawErrorStatus && !done && sseDecoder.pending !== '') {
       if (consume('\n\n')) done = true
     }
     /*

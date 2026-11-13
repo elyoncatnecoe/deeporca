@@ -1,5 +1,6 @@
 import { netRequest, netRequestBinary, netStream, NetError } from './net.ts'
 import { dataUrlOf, estimateDataUrlBytes, MAX_IMAGE_BYTES, mediaWithinLimit, parseDataUrl } from './media-store.ts'
+import { SseDecoder } from './sse.ts'
 import type { ImageApiConfig, SpeechApiConfig } from './types'
 
 /**
@@ -862,7 +863,8 @@ async function synthesizeSpeechOpenRouter(
     stream: true,
   }
   const audioData: string[] = []
-  let raw = ''
+  // SSE 解码器（规范实现，见 sse.ts）。以前这里手写 /\r?\n\r?\n/ 切分（T-12 只补了 CRLF）。
+  const sseDecoder = new SseDecoder()
   const consumePayload = (payload: string): void => {
     if (payload === '[DONE]') return
     let parsed: StreamAudioDelta
@@ -875,27 +877,14 @@ async function synthesizeSpeechOpenRouter(
     const data = choice?.delta?.audio?.data ?? choice?.message?.audio?.data
     if (typeof data === 'string' && data.trim() !== '') audioData.push(data.trim())
   }
+  /**
+   * 把一段原始文本喂给 SSE 解码器。事件边界、多行 data、注释保活、CR-only 换行
+   * 全部交给 sse.ts（T-12 以前只补了 CRLF，别的换行仍会漏事件）。
+   * 网关不按 SSE 返回时，结束时再按整包 JSON 兜底（见下方）。
+   */
   const consumeText = (textChunk: string): void => {
-    raw += textChunk
-    /*
-     * 优先按 SSE 的 data: 行解析；如果网关不按 SSE 返回，结束时再按 JSON 兜底。
-     *
-     * 事件边界必须容忍 CRLF（T-12）：`\r\n\r\n` 里并不含 `\n\n` 子串，以前用
-     * indexOf('\n\n') 找边界，CRLF 网关一个事件都切不出来 —— 收尾时把整段 data:
-     * 行拼成一个 payload 去 JSON.parse，必然失败，最后报「语音模型没有返回音频」。
-     * deepseek.ts 的 SSE 解析一直用的是 /\r?\n\r?\n/，这里对齐。
-     */
-    let boundary = /\r?\n\r?\n/.exec(raw)
-    while (boundary !== null) {
-      const event = raw.slice(0, boundary.index)
-      raw = raw.slice(boundary.index + boundary[0].length)
-      const payload = event
-        .split(/\r?\n/)
-        .filter((line) => line.startsWith('data:'))
-        .map((line) => line.slice(5).trimStart())
-        .join('\n')
-      if (payload !== '') consumePayload(payload)
-      boundary = /\r?\n\r?\n/.exec(raw)
+    for (const event of sseDecoder.push(textChunk)) {
+      if (event.data !== '') consumePayload(event.data)
     }
   }
 
@@ -910,8 +899,10 @@ async function synthesizeSpeechOpenRouter(
     },
     { onChunk: consumeText },
   )
-  // 流结束：把最后一段没有空行结尾的 event 处理掉。
-  if (raw.trim() !== '') consumeText('\n\n')
+  // 流结束：把最后一段没有空行结尾的 event 处理掉（T-12 的收尾不能丢）。
+  // 注意用 `!== ''` 而不是 trim：CR-only 网关收尾时缓冲区可能只剩一个 \r，
+  // 但那是最后一个事件的终止符，trim 掉就再也派发不出来了。
+  if (sseDecoder.pending !== '') consumeText('\n\n')
   if (response.status >= 400) throw new MediaApiError(response.status, errorDetailText(response.text))
   // 非 SSE 的兼容路径：有的中转站忽略 stream，直接回完整 JSON。
   if (audioData.length === 0 && response.text.trim().startsWith('{')) {
@@ -933,10 +924,9 @@ async function synthesizeSpeechOpenRouter(
     bytes = decodeBase64ToBytes(audioData.join(''))
   }
   /*
-   * 到这里 raw（整段响应原文）和 audioData（每片 base64）就没用了，而它们加起来
-   * 通常比最终音频还大。显式放掉，别让它们陪着 dataUrl 一起常驻（T-20）。
+   * 到这里 audioData（每片 base64）就没用了，而它加起来通常比最终音频还大。
+   * 显式放掉，别让它陪着 dataUrl 一起常驻（T-20）。
    */
-  raw = ''
   audioData.length = 0
   return { dataUrl: dataUrlOf(audioMime(config.format), bytesToBase64(bytes)), mime: audioMime(config.format) }
 }

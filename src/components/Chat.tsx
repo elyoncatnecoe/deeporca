@@ -1413,7 +1413,7 @@ export function Chat() {
               {live.reasoning.trim() !== '' && <ReasoningPanel text={live.reasoning} live />}
               {live.content.trim() !== '' ? (
                 <div className="bubble-body">
-                  <Markdown text={live.content} onRun={runSnippet} onSave={(code, lang) => void saveSnippet(code, lang)} />
+                  <Markdown text={live.content} streaming onRun={runSnippet} onSave={(code, lang) => void saveSnippet(code, lang)} />
                   <span className="caret" />
                 </div>
               ) : (
