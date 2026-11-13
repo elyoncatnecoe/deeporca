@@ -2,6 +2,7 @@ import petCssRaw from '../components/pet/pet.css?raw'
 import petSvgRaw from '../components/pet/pet.svg?raw'
 import { mountPet } from '../components/pet/mountPet'
 import { DEFAULT_AVATARS } from './avatar-defaults'
+import { currentAssistantAvatar } from '../components/Avatar'
 import { avatarStore } from './avatars'
 import { buildMemoryExportPrompt } from './persona-export'
 import { useAppStore } from './store'
@@ -356,11 +357,19 @@ function webModeBootstrap(config: WebModeConfig, mountPetFn: typeof mountPet): v
 export function webModeScript(options: WebModeOptions): string {
   // 右键菜单的两段文本：页面里访问不到 App 的 store，所以先算好随 config 带进去。
   const { settings, memories } = useAppStore.getState()
+  /*
+   * 网页端贴哪个「助手头像」：助手开着就用**当前助手自己的**那张，关掉才回落到设置里的。
+   *
+   * 以前这里永远取 avatarStore（设置级），于是用户在助手页换了头像、网页端纹丝不动 ——
+   * 就是用户反馈的「两个头像打架」。
+   * 注：emoji 头像没有图片源（注入脚本只画 <img>），`avatarSrc` 是空串，这里会回落到设置头像。
+   */
+  const ownAssistantAvatar = currentAssistantAvatar(settings).avatarSrc
   const config: WebModeConfig = {
     avatar: options.avatar,
     pet: options.pet,
     user: avatarStore.get('user'),
-    assistant: avatarStore.get('assistant'),
+    assistant: ownAssistantAvatar !== '' ? ownAssistantAvatar : avatarStore.get('assistant'),
     userDefault: DEFAULT_AVATARS.user,
     assistantDefault: DEFAULT_AVATARS.assistant,
     petSvg: petSvgRaw,

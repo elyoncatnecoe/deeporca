@@ -1,6 +1,9 @@
 import { useSyncExternalStore } from 'react'
 import { assistantAvatarSrc, DEFAULT_AVATARS } from '../lib/avatar-defaults'
 import { avatarStore, type AvatarRole } from '../lib/avatars'
+import { avatarOwnerFor, avatarSourceFor } from '../lib/avatar-pick'
+import { findAssistant } from '../lib/assistant'
+import type { Assistant, ChatMessage, Conversation, Settings } from '../lib/types'
 
 /**
  * 头像。三种来源按优先级：
@@ -73,4 +76,54 @@ export function assistantAvatarProps(input: {
 }): { avatarSrc: string; emoji: string } {
   const src = assistantAvatarSrc(input)
   return { avatarSrc: src, emoji: input.avatar ?? '' }
+}
+
+/**
+ * 这一屏 / 这一页该用哪个「助手头像」。
+ *
+ * 助手开着 → 当前助手自己的头像（内置 SVG / 上传图 / emoji）；
+ * 助手关掉 → 返回空，让调用方回落到设置里的全局头像（avatarStore）。
+ *
+ * 为什么要有这个函数：以前聊天气泡有的地方用助手头像、有的地方用设置头像，
+ * 网页端则永远只用设置级 —— 用户看到的就是「两个头像在打架」。
+ * 现在只有一个来源：开着助手，助手说了算。
+ *
+ * 注意 emoji：`avatarSrc` 会是空串（emoji 没有图片源）。App 里 Avatar 会渲染文字头像；
+ * 网页注入脚本只会画 `<img>`，那边由调用方回落到设置头像（见 web-mode.ts）。
+ */
+export function currentAssistantAvatar(settings: Settings): { avatarSrc: string; emoji: string } {
+  if (avatarSourceFor(settings) !== 'assistant') return { avatarSrc: '', emoji: '' }
+  return assistantAvatarProps(findAssistant(settings, settings.assistantId))
+}
+
+/**
+ * 一条助手气泡该用谁的头像 —— 跟着「这条是谁说的」，不跟着「现在选的是谁」。
+ *
+ * 以前气泡只按当前助手取头像：用户在同一个对话里换了助手，**连历史消息的头像都一起变**，
+ * 而那些消息是上一个助手说的。这里按「消息作者 → 对话绑定的助手 → 设置级」回落。
+ *
+ * 返回 `undefined` 表示「用设置里那张」（助手功能关着，或两个 id 都没有）。
+ */
+export function messageAvatarProps(input: {
+  settings: Settings
+  conversation: Conversation | undefined
+  message: ChatMessage
+  assistants: readonly Assistant[]
+}): { avatarSrc: string; emoji: string } | undefined {
+  const owner = avatarOwnerFor({
+    enabled: avatarSourceFor(input.settings) === 'assistant',
+    messageAssistantId: input.message.assistantId,
+    conversationAssistantId: input.conversation?.assistantId,
+  })
+  if (owner === 'settings') return undefined
+
+  const authorId = owner === 'message-assistant' ? input.message.assistantId : input.conversation?.assistantId
+  const author = authorId === undefined ? undefined : input.assistants.find((item) => item.id === authorId)
+  if (author !== undefined) return assistantAvatarProps(author)
+  /*
+   * 作者被删了：用这段对话自己的配置快照（ConversationConfig 里存着头像来源），
+   * 而不是掉到「当前助手」—— 那正是这次要修的错误行为。
+   */
+  if (input.conversation?.config !== undefined) return assistantAvatarProps(input.conversation.config)
+  return undefined
 }

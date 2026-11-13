@@ -2853,8 +2853,10 @@ button:disabled {
    * index.html 里改成 interactive-widget=resizes-content 后，布局视口本身会缩，
    * 固定容器跟着缩，浏览器在缩小的视口里把输入框滚到键盘上方 —— 正确行为。
    *
-   * 这时候如果还按 --ime-inset 预留一份底部内边距，等于把键盘高度算两遍：
-   * 滚动定位会把输入框推到几乎贴顶（用户看到的还是「弹到顶部」）。
+   * 注意：interactive-widget 是 Chrome 108 才加的（WebView 同理）。老 WebView
+   * （实测有 Android 12 机器停在 91.0.4472.114）会忽略这个 meta，那边真正的修复
+   * 就是**这一行**：以前 scroll-padding-bottom 里叠了一份键盘高度，滚动定位把输入框
+   * 推到几乎贴顶 —— 用户看到的就是「弹到顶部」。所以这条 padding 不许再加回去。
    */
   scroll-padding-bottom: 12px;
 }
