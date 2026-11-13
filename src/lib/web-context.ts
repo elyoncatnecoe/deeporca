@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 把「助手人设 + 常驻记忆」同步给网页账号（DOM 遥控窗 + HTTP 直发）。
  *
  * 网页账号模式没有 system 角色，所以人设只能当成一段文字塞进用户消息。
@@ -38,6 +38,19 @@ export interface WebContextInput {
  * 避免把整库塞进输入框，也避免块随对话标题/内容变化而抖动。
  */
 export function buildWebChatContext(input: WebContextInput): string {
+  /*
+   * 助手功能关掉 = 纯净模式：不注入任何人设与记忆。
+   *
+   * 这条判断必须和 prompt.ts 的 buildSystemPrompt 同源。以前只有 API 那条路认
+   * `assistantsEnabled`，网页账号这条路照样把助手人设拼进每条消息 —— 用户看到的
+   * 就是「全局关了助手，网页端还在按助手人设说话」。
+   *
+   * 这里返回空串而不是中性开场：native 侧的判据是
+   * `needPersona = persona !== '' && persona !== thread.persona`，
+   * 空串正好表示「不需要前置人设」，也就是真的不注入。
+   */
+  if (input.settings.assistantsEnabled !== true) return ''
+
   const persona = personaOpening(input.settings, input.persona, input.name)
 
   const selection = selectForPrompt({

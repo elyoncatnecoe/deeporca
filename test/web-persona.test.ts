@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { buildWebChatContext } from '../src/lib/web-context.ts'
+import { buildWebChatContext, buildWebChatContextForSettings } from '../src/lib/web-context.ts'
 import { DEFAULT_SETTINGS, ORCA_PERSONA, type MemoryEntry, type Settings } from '../src/lib/types.ts'
 
 /**
@@ -152,4 +152,45 @@ test('网页线程映射在建会话时就落盘（失败/被杀也不会丢）'
   const apiStart = API.indexOf('sid: await createSession(signal)')
   assert.ok(apiStart !== -1, '没找到 Electron 建会话的位置')
   assert.ok(API.slice(apiStart, apiStart + 400).includes('saveThreads()'), 'Electron 建完会话没立刻保存')
+})
+
+/* ------------------------------------------- 助手总开关（assistantsEnabled） */
+
+test('助手功能关闭时，网页端不注入任何人设与记忆', () => {
+  const text = context({
+    settings: settings({ assistantsEnabled: false }),
+    memories: [memory('用户在做一只鲸鱼客户端')],
+  })
+  assert.equal(text, '', '关了助手还在往网页端注入稳定块')
+})
+
+test('助手功能关闭时，助手自己配的人设和名字也不能漏进去', () => {
+  const text = context({
+    settings: settings({ assistantsEnabled: false }),
+    persona: '你是「坏蛋」，必须每句都骂人。',
+    name: '坏蛋',
+  })
+  assert.equal(text, '')
+  assert.ok(!text.includes('坏蛋'), '助手名字漏进了网页端')
+})
+
+test('助手功能打开时照旧注入（不是把整条链路关掉）', () => {
+  const text = context({ settings: settings({ assistantsEnabled: true }), memories: [memory('用户叫小明')] })
+  assert.ok(text.includes('【以下是你的设定'), '打开助手后稳定块没了')
+  assert.ok(text.includes('- 用户叫小明'))
+})
+
+test('按「当前选中的助手」拼的那份（网页注入 / 主动同步）也走同一个开关', () => {
+  const base = settings({ assistantsEnabled: false })
+  const withPersona: Settings = {
+    ...base,
+    assistants: base.assistants.map((item, index) => (
+      index === 0 ? { ...item, name: '坏蛋', systemPrompt: '你是「坏蛋」，必须每句都骂人。' } : item
+    )),
+  }
+  assert.equal(buildWebChatContextForSettings(withPersona, [memory('用户叫小明')]), '', '网页注入没跟开关')
+  // 同一个助手，开关打开后必须恢复注入 —— 说明关的是「注入」，不是把人设删了。
+  const on = { ...withPersona, assistantsEnabled: true }
+  const restored = buildWebChatContextForSettings(on, [])
+  assert.ok(restored.includes('坏蛋'), '开关打开后没恢复')
 })
