@@ -1,6 +1,9 @@
 import { useSyncExternalStore } from 'react'
 import { assistantAvatarSrc, DEFAULT_AVATARS } from '../lib/avatar-defaults'
 import { avatarStore, type AvatarRole } from '../lib/avatars'
+import { avatarSourceFor } from '../lib/avatar-pick'
+import { findAssistant } from '../lib/assistant'
+import type { Settings } from '../lib/types'
 
 /**
  * 头像。三种来源按优先级：
@@ -73,4 +76,22 @@ export function assistantAvatarProps(input: {
 }): { avatarSrc: string; emoji: string } {
   const src = assistantAvatarSrc(input)
   return { avatarSrc: src, emoji: input.avatar ?? '' }
+}
+
+/**
+ * 这一屏 / 这一页该用哪个「助手头像」。
+ *
+ * 助手开着 → 当前助手自己的头像（内置 SVG / 上传图 / emoji）；
+ * 助手关掉 → 返回空，让调用方回落到设置里的全局头像（avatarStore）。
+ *
+ * 为什么要有这个函数：以前聊天气泡有的地方用助手头像、有的地方用设置头像，
+ * 网页端则永远只用设置级 —— 用户看到的就是「两个头像在打架」。
+ * 现在只有一个来源：开着助手，助手说了算。
+ *
+ * 注意 emoji：`avatarSrc` 会是空串（emoji 没有图片源）。App 里 Avatar 会渲染文字头像；
+ * 网页注入脚本只会画 `<img>`，那边由调用方回落到设置头像（见 web-mode.ts）。
+ */
+export function currentAssistantAvatar(settings: Settings): { avatarSrc: string; emoji: string } {
+  if (avatarSourceFor(settings) !== 'assistant') return { avatarSrc: '', emoji: '' }
+  return assistantAvatarProps(findAssistant(settings, settings.assistantId))
 }

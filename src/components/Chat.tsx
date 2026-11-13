@@ -59,7 +59,7 @@ import { SpeechButton } from './SpeechButton'
 import { TurnNavigator } from './TurnNavigator'
 import { QuickCommands } from './QuickCommands'
 import { buildTurns } from '../lib/turns'
-import { Avatar, assistantAvatarProps } from './Avatar'
+import { Avatar, assistantAvatarProps, currentAssistantAvatar } from './Avatar'
 import { Markdown } from './Markdown'
 import { IconButton, Modal, Spinner } from './ui'
 import { confirmDialog } from './ConfirmDialog'
@@ -290,11 +290,18 @@ function Bubble(props: {
   // 群聊里每条消息要显示「是哪个助手说的」。这里订阅 assistants 数组本身
   // （引用稳定，只有真的增删改时才会变），避免选择器返回新对象触发无限重渲染。
   const assistants = useAppStore((state) => state.settings.assistants)
+  // 取整个 settings 而不是在 selector 里算头像：selector 返回新对象会让 zustand 无限重渲染。
+  const settings = useAppStore((state) => state.settings)
   const speaker = message.assistantId === undefined
     ? undefined
     : assistants.find((item) => item.id === message.assistantId)
   const speakerName = message.assistantName ?? speaker?.name ?? assistantName
   const speakerAvatar = speaker !== undefined ? assistantAvatarProps(speaker) : undefined
+  /*
+   * 没有 speaker（老消息 / 单聊）时用哪个头像：助手开着就是当前助手的，
+   * 关掉才回落到设置里那张。以前这里直接画设置级，和上面 speaker 分支打架。
+   */
+  const fallbackAvatar = currentAssistantAvatar(settings)
   const regexesJson = useAppStore((state) => {
     const conversation = state.conversations.find((item) => item.id === state.activeId)
     return JSON.stringify(conversationConfig(state.settings, conversation).regexes)
@@ -456,7 +463,7 @@ function Bubble(props: {
           {speakerAvatar !== undefined ? (
             <Avatar role="assistant" size={17} avatarSrc={speakerAvatar.avatarSrc} emoji={speakerAvatar.emoji} />
           ) : (
-            <Avatar role="assistant" size={17} />
+            <Avatar role="assistant" size={17} {...fallbackAvatar} />
           )}
           <span>{speakerName}</span>
           <time>{timeOf(message.createdAt)}</time>
@@ -1399,7 +1406,8 @@ export function Chat() {
           {live !== null && live.conversationId === activeId && (
             <article className="bubble bubble-assistant bubble-live">
               <div className="bubble-author">
-                <Avatar role="assistant" size={17} />
+                {/* 头像与名字必须同源：名字跟当前助手走，头像也得跟，否则就是「两个头像打架」。 */}
+                <Avatar role="assistant" size={17} {...currentAssistantAvatar(settings)} />
                 {/* 名字跟着当前助手走，别写死「深鲸」——切助手后这里要对得上。 */}
                 <span>{activeConfig.name}</span>
                 <em className="live-dot">{live.content.trim() !== '' ? '正在输入' : '正在思考'}</em>
