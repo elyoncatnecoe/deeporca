@@ -18,8 +18,10 @@ test("人设只在首轮或它真的变了之后拼进 prompt", () => {
   // 只认首轮的话，用户中途改人设永远到不了网页线程；只认变化而没有稳定块
   // 的话，又会变成每条消息都重拼（见 test/web-persona.test.ts）。
   assert.ok(API.includes("needPersona"), "缺少 needPersona 判据")
-  assert.ok(API.includes("persona !== thread.persona"), "没有和上次拼进去的人设比较")
-  assert.ok(API.includes("thread.persona = persona"), "没有记住这次拼进去的人设")
+  // 比较与「记下这一版」都挪进了共享状态机 src/lib/web-persona-state.ts，
+  // 这里守住「仍然拿上次拼进去的那版做比较」「仍然记下这次拼进去的那版」。
+  assert.ok(API.includes("decidePersona(thread.persona, persona)"), "没有和上次拼进去的人设比较")
+  assert.ok(API.includes("thread.persona = decision.cache"), "没有记住这次拼进去的人设")
   assert.ok(API.includes("systemPrompt"), "缺少 systemPrompt 入参")
 })
 

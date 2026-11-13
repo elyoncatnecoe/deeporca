@@ -384,6 +384,13 @@ function relayBootstrap(): void {
         payload = ctxPrefix + '\n\n' + text
         injected = true
       }
+    } else {
+      /*
+       * 这一轮没有设定（助手关着）：顺手把旧标记清掉。
+       * 覆盖「关助手时网页窗没开、setContext('') 没送到」的情况 —— 下次真正发送时
+       * 把残留的 A 清掉，重新打开助手才能重新注入。
+       */
+      writeSentContext('')
     }
     // 先记下当前已有多少个助手气泡 / 思考块，之后的增量才是这次的回话。
     baseline = answerNodes().length
@@ -434,6 +441,14 @@ function relayBootstrap(): void {
       // 这一版」「页面是不是空对话」判断——上层每轮发送前都会同步一次设定，
       // 这里要是无条件重置标记，人设就会被每条消息重复灌进网页对话。
       ctxPrefix = text
+      /*
+       * 空设定 = 助手被关掉了：连「这一版已经拼过」的标记一起清掉。
+       *
+       * 不清的话，用户重新打开同一个助手、人设一个字都没变时，
+       * send 里的 alreadySent 仍然成立，人设会被永久跳过。
+       * 只清标记，不动网页对话本身（旧消息本来也撤不回来）。
+       */
+      if (text === '') writeSentContext('')
     },
     /** 页面重载后脚本会重跑，这里给老引用一个刷新入口。 */
     refresh: function (): void {

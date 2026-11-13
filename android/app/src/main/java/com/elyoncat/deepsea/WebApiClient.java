@@ -190,6 +190,27 @@ public final class WebApiClient {
         saveThreads();
     }
 
+    /**
+     * 把所有线程「这一版人设已经拼过」的标记清掉（并落盘）。
+     *
+     * 助手被关掉时调用：那一刻上层推下来的是空人设，不注入是对的，但缓存必须一起清。
+     * 否则用户再打开同一个助手、人设一个字都没变，去重会认为「A 已经拼过」而永远跳过，
+     * 网页那边就一直用关掉之前的旧设定说话。
+     *
+     * 只动 persona 字段：sid / mid / 历史消息一律保留 —— 清标记不等于撤回旧消息，
+     * 已经发进网页会话里的设定本来就撤不回来。
+     * 与 Electron 侧 electron/deepseek-api.ts 的 clearPersonaCache() 逐条对应。
+     */
+    static void clearPersonaCache() {
+        boolean changed = false;
+        for (WebThread thread : THREADS.values()) {
+            if (thread.persona == null || thread.persona.isEmpty()) continue;
+            thread.persona = "";
+            changed = true;
+        }
+        if (changed) saveThreads();
+    }
+
     /* ---------------- 发消息 ---------------- */
 
     /** 一次回复：正文加思考过程。 */
@@ -241,6 +262,18 @@ public final class WebApiClient {
         // 否则这里就退化成「每条消息都重拼一遍人设」。
         String persona = systemPrompt == null ? "" : systemPrompt.trim();
         boolean needPersona = !persona.isEmpty() && !persona.equals(thread.persona);
+        /*
+         * 空人设（助手被关掉）：这一轮不注入，但**立刻**把去重标记清掉并落盘。
+         *
+         * 不清的话，「开 A → 关 → 再开 A」第三步会被判成「A 已经拼过」而永久跳过，
+         * 网页那边就一直用关掉之前的旧设定。只清标记：sid / mid / 历史消息都不动，
+         * 已经发进网页会话里的旧设定本来就撤不回来。
+         * 与 Electron 侧 electron/deepseek-api.ts 的同一段逐条对应。
+         */
+        if (persona.isEmpty() && !thread.persona.isEmpty()) {
+            thread.persona = "";
+            saveThreads();
+        }
         String fullPrompt = needPersona ? (persona + "\n\n---\n\n" + prompt) : prompt;
 
         StringBuilder text = new StringBuilder();

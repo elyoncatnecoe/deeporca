@@ -27,6 +27,7 @@ import { join, dirname, sep } from 'node:path'
 import { Worker } from 'node:worker_threads'
 import { PatchReader, iterSse } from './sse'
 import { powHeader, solvePow, type PowChallenge } from './pow'
+import { decidePersona } from '../src/lib/web-persona-state'
 
 const CHAT_ORIGIN = 'https://chat.deepseek.com'
 const COMPLETION_PATH = '/api/v0/chat/completion'
@@ -447,6 +448,27 @@ function saveThreads(): void {
   }
 }
 
+/**
+ * 把所有线程「这一版人设已经拼过」的标记清掉（并落盘）。
+ *
+ * 助手被关掉时调用：那一刻渲染层推下来的是空人设，不注入是对的，但**缓存必须一起清**。
+ * 否则用户再打开同一个助手、人设内容一个字都没变，去重会认为「A 已经拼过」而永远跳过，
+ * 网页那边就一直用关掉之前的旧设定说话。
+ *
+ * 只动 `persona` 这一个字段：sid / mid / 历史消息一律保留 —— 清标记不等于撤回旧消息，
+ * 已经发进网页会话里的设定本来就撤不回来。
+ */
+export function clearPersonaCache(): void {
+  loadThreads()
+  let changed = false
+  for (const thread of threadMap.values()) {
+    if (thread.persona === '') continue
+    thread.persona = ''
+    changed = true
+  }
+  if (changed) saveThreads()
+}
+
 export function forgetThread(conversationKey: string): void {
   threadMap.delete(conversationKey)
   saveThreads()
@@ -640,7 +662,25 @@ async function webSendInner(options: WebSendOptions, signal: AbortSignal): Promi
   // 情况下除了首轮都不会命中——每轮都在变的东西（身体读数、时间、摘要）绝不能
   // 进这个字符串，否则这里就退化成「每条消息都重拼一遍人设」。
   const persona = (options.systemPrompt ?? '').trim()
-  const needPersona = persona !== '' && persona !== thread.persona
+  /*
+   * 去重规则抽到 src/lib/web-persona-state.ts，和 Android 的 WebApiClient 逐条对应。
+   * 关键一条：人设为空（助手被关掉）时要返回 cache='' —— 缓存不清的话，
+   * 「开 A → 关 → 再开 A」第三步会以为 A 已经拼过，于是再也不注入。
+   */
+  const decision = decidePersona(thread.persona, persona)
+  const needPersona = decision.inject
+  /*
+   * 空人设（助手被关掉）：这一轮不注入，但**立刻**把去重标记清掉并落盘。
+   *
+   * 不清的话，「开 A → 关 → 再开 A」第三步会被判成「A 已经拼过」而永久跳过，
+   * 网页那边就一直用关掉之前的旧设定。只清标记：sid / 历史消息都不动。
+   * （decision.cache 在空人设时就是 ''，所以这里直接用返回值，不另写一份规则。）
+   */
+  if (persona === '' && thread.persona !== decision.cache) {
+    thread.persona = decision.cache
+    threadMap.set(options.conversationKey, thread)
+    saveThreads()
+  }
   const promptText = needPersona ? `${persona}\n\n---\n\n${options.prompt}` : options.prompt
 
   const reader = new PatchReader()
@@ -682,7 +722,7 @@ async function webSendInner(options: WebSendOptions, signal: AbortSignal): Promi
     // 服务端已经收下这条消息了：这时候才敢把「人设拼过了」记下来。
     // 只在整轮成功结束时记的话，中途断流/被停止就会漏记，下一轮又把设定重拼一遍。
     if (needPersona) {
-      thread.persona = persona
+      thread.persona = decision.cache
       threadMap.set(options.conversationKey, thread)
       saveThreads()
     }

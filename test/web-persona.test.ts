@@ -120,8 +120,10 @@ test('走不走网页账号以「这段对话实际用的模型」为准', () =>
 
 test('桌面端按「和上次是否一样」决定重拼，不再只认首轮', () => {
   assert.ok(API.includes('needPersona'), '主进程没有 needPersona 判据')
-  assert.ok(API.includes('persona !== thread.persona'), '没有比较上次拼进去的人设')
-  assert.ok(API.includes('thread.persona = persona'), '没有记住这次拼进去的人设')
+  // 判据挪进了共享状态机（src/lib/web-persona-state.ts），行为不变：
+  // 拿「上次真的拼进去的那一版」和这一版比，比完把这一版记下来。
+  assert.ok(API.includes('decidePersona(thread.persona, persona)'), '没有比较上次拼进去的人设')
+  assert.ok(API.includes('thread.persona = decision.cache'), '没有记住这次拼进去的人设')
 })
 
 test('Android 侧同样是「变了才重拼」，并把稳定块存盘', () => {
