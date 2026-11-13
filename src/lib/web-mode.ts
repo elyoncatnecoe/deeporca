@@ -67,7 +67,7 @@ function webModeBootstrap(config: WebModeConfig, mountPetFn: typeof mountPet): v
       // overflow-x:auto 给代码块用，而头像是绝对定位在它里面的，
       // 一旦被它裁掉就表现为「头像被切边、露在框外」。
       '.' + AV_CLASS + '{position:absolute;top:2px;left:-36px;width:27px;height:27px;border-radius:0 !important;',
-      'object-fit:cover;pointer-events:none;user-select:none;background:transparent !important;',
+      'object-fit:contain;pointer-events:none;user-select:none;background:transparent !important;',
       'background-color:transparent !important;border:0 !important;box-shadow:none !important;z-index:2;}',
       '.' + AV_CLASS + '[data-default="true"]{object-fit:contain;border-radius:0 !important;filter:none !important;}',
       '.' + ANCHOR_CLASS + '{position:relative !important;overflow:visible !important;}',
@@ -76,6 +76,9 @@ function webModeBootstrap(config: WebModeConfig, mountPetFn: typeof mountPet): v
       // 即使祖先 overflow:hidden 也裁不到它。
       '.' + ANCHOR_CLASS + '[data-av-gutter="true"]{padding-left:34px !important;box-sizing:border-box !important;}',
       '.' + AV_CLASS + '[data-av-inside="true"]{left:0 !important;}',
+      // 解除「内容安全」的前端遮挡：站点只用 CSS 把正文模糊/透明/文字遮罩掉，原文仍在
+      // DOM 里。这里强制还原最常见几种遮挡（正常内容本来就是 none，不受影响）。
+      '.ds-markdown, .ds-markdown *{filter:none !important;-webkit-text-security:none !important;text-shadow:none !important;}',
     ].join('')
     document.head.appendChild(style)
   }
@@ -164,7 +167,19 @@ function webModeBootstrap(config: WebModeConfig, mountPetFn: typeof mountPet): v
    *   · 否则：给锚点加 data-av-gutter（padding-left:34px），头像 left:0 落在
    *     padding 里。padding 属于盒子内部，祖先 overflow:hidden 也裁不到它。
    */
-  function placeAvatar(anchor: Element, image: HTMLImageElement, row: Element): void {
+  function placeAvatar(anchor: Element, image: HTMLImageElement, row: Element, role: string): void {
+    /*
+     * 助手正文是满宽容器，左侧没有真正可借的空白；之前按「有空白就贴 negative left」摆，
+     * 会被正文/标题容器的 overflow 裁掉几个像素（老 bug 的回归）。助手头像一律走进
+     * padding 槽位：padding 属于盒子内部，任何祖先 overflow 都裁不到。用户气泡是右对齐
+     * 小块、左侧空白充足，继续用 negative left。
+     */
+    if (role === 'assistant') {
+      image.setAttribute('data-av-inside', 'true')
+      anchor.setAttribute('data-av-gutter', 'true')
+      image.style.left = ''
+      return
+    }
     var anchorLeft = anchor.getBoundingClientRect().left
     var rowLeft = row.getBoundingClientRect().left
     var room = anchorLeft - rowLeft
@@ -250,7 +265,7 @@ function webModeBootstrap(config: WebModeConfig, mountPetFn: typeof mountPet): v
       }
       markAnchor(anchor)
       // 每轮都重新摆一次：布局变了（窗口缩放、换行、站点改版）也能自己纠正。
-      placeAvatar(anchor, image, row)
+      placeAvatar(anchor, image, row, role)
     }
 
     // 清掉被复用到别处、已经不挂在锚点上的旧头像
@@ -260,6 +275,37 @@ function webModeBootstrap(config: WebModeConfig, mountPetFn: typeof mountPet): v
       var parent = node.parentElement
       if (parent === null) continue
       if (anchors.indexOf(parent) === -1 && parent.parentNode !== null) parent.removeChild(node)
+    }
+  }
+
+  /**
+   * 尽力解除「内容安全」的前端遮挡（模糊 / 半透明 / 文字遮罩）。
+   *
+   * 站点命中内容审查时往往已把原文渲染进 DOM，只是用 CSS 把它模糊/透明/遮住。这里只在
+   * 正文区（.ds-markdown）及其上 3 层祖先上还原这些属性，尽量避免误伤其它界面；对正常
+   * 内容这些属性本就是 none/1，是幂等的。
+   */
+  function revealCensored(): void {
+    var marks = document.querySelectorAll('.ds-markdown')
+    for (var i = 0; i < marks.length; i += 1) {
+      var node: Element | null = marks[i]
+      var depth = 0
+      while (node !== null && node !== document.body && depth < 4) {
+        var s = window.getComputedStyle(node)
+        var style = (node as HTMLElement).style
+        if (s.filter !== '' && s.filter !== 'none') style.setProperty('filter', 'none', 'important')
+        var opacity = parseFloat(s.opacity)
+        if (!isNaN(opacity) && opacity < 0.99) style.setProperty('opacity', '1', 'important')
+        if (s.color === 'transparent' || /^rgba?\([^)]*,\s*0(?:\.0+)?\s*\)$/.test(s.color)) {
+          style.setProperty('color', 'inherit', 'important')
+        }
+        var security = (s as unknown as { webkitTextSecurity?: string }).webkitTextSecurity
+        if (security !== undefined && security !== '' && security !== 'none') {
+          style.setProperty('-webkit-text-security', 'none', 'important')
+        }
+        node = node.parentElement
+        depth += 1
+      }
     }
   }
 
@@ -311,6 +357,7 @@ function webModeBootstrap(config: WebModeConfig, mountPetFn: typeof mountPet): v
       window.setTimeout(function (): void {
         scheduled = false
         syncAvatars()
+        revealCensored()
         mountPetOnce()
       }, 500)
     })
@@ -319,11 +366,14 @@ function webModeBootstrap(config: WebModeConfig, mountPetFn: typeof mountPet): v
     // SPA 偶尔整块换掉 body，观察器可能丢；低频兜底
     window.setInterval(function (): void {
       syncAvatars()
+      revealCensored()
       mountPetOnce()
     }, 4000)
 
     ;(window as unknown as { deepseaAvatars?: unknown }).deepseaAvatars = {
       sync: syncAvatars,
+      /** 手动解除内容遮挡（控制台里调一下，遇到拦截时立刻还原一次）。 */
+      reveal: revealCensored,
       /** 控制台里 deepseaAvatars.dump() 能看到认了几行、认成什么角色 —— 排查用。 */
       dump: function (): unknown {
         var list = rowList()

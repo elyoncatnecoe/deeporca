@@ -791,7 +791,7 @@ async function webSendInner(options: WebSendOptions, signal: AbortSignal): Promi
   if (reader.messageId !== null) thread.mid = reader.messageId
   threadMap.set(options.conversationKey, thread)
   saveThreads()
-  return { threadCreated, text: reader.text, reasoning: reader.reasoning }
+  return { threadCreated, text: reader.text !== '' ? reader.text : reader.template, reasoning: reader.reasoning }
 }
 
 /* ------------------------------------------------------------------ */
