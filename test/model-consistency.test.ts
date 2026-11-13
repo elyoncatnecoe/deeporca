@@ -62,6 +62,8 @@ function conversationWith(config: Conversation['config']): Conversation {
 
 test('没有助手覆盖、没有快照时，跟随全局模型', () => {
   const settings = settingsWith({
+    // 网页账号要过「纸雕虎鲸」总闸（默认关）：这里测的是取值优先级，先把闸门打开。
+    webPet: true,
     model: 'deepseek-chat-web',
     assistants: [{ ...baseAssistant, model: '' }],
   })
@@ -78,6 +80,7 @@ test('助手覆盖了模型时，以助手为准（全局是 API 模型的前提
 
 test('全局选了网页账号时，助手覆盖不能把它拽回 API 模型（真机 401 的根因）', () => {
   const settings = settingsWith({
+    webPet: true,
     model: 'deepseek-chat-web',
     assistants: [{ ...baseAssistant, model: 'deepseek-chat' }],
   })
@@ -89,7 +92,7 @@ test('全局选了网页账号时，助手覆盖不能把它拽回 API 模型（
 })
 
 test('全局选了网页账号时，对话快照也不能把它拽回 API 模型', () => {
-  const settings = settingsWith({ model: 'deepseek-chat-web' })
+  const settings = settingsWith({ webPet: true, model: 'deepseek-chat-web' })
   const conversation = conversationWith({
     name: baseAssistant.name,
     avatar: baseAssistant.avatar,
@@ -108,6 +111,7 @@ test('全局选了网页账号时，对话快照也不能把它拽回 API 模型
 
 test('对话快照优先于助手覆盖', () => {
   const settings = settingsWith({
+    webPet: true,
     model: 'deepseek-chat',
     assistants: [{ ...baseAssistant, model: 'deepseek-chat' }],
   })

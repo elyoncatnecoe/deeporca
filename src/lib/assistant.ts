@@ -1,6 +1,7 @@
 import type { Assistant, AssistantRegex, Conversation, ConversationConfig, Settings, ThinkingEffort } from './types.ts'
 import { DEFAULT_ASSISTANT_ID } from './types.ts'
 import { isWebChatModel } from './models.ts'
+import { applyWebGate } from './web-gate.ts'
 
 /**
  * 取一个助手；找不到就退回第一个（永远存在，sanitize 保证）。
@@ -93,14 +94,22 @@ export function effectiveSettings(settings: Settings, conversation: Conversation
    * 反过来仍然成立：全局是 API 模型时，对话快照 / 助手可以单独指定网页模型。
    */
   const model = isWebChatModel(settings.model) ? settings.model : cfg.model
-  return {
+  /*
+   * 最后一道闸：网页账号总闸（纸雕虎鲸）关着时，不管这个模型是全局选的、助手覆盖的，
+   * 还是历史对话快照里存的，都不能让最终配置落在网页账号路径上。
+   *
+   * 只藏对话页的模型选项是不够的 —— 助手可以单独指定模型，老对话还带着自己的快照，
+   * 这两条路都不经过模型选择器。这里是「这段对话实际生效的设置」的唯一来源，
+   * 闸门放在这里才能覆盖全部来源。
+   */
+  return applyWebGate({
     ...settings,
     model,
     temperature: cfg.temperature,
     thinkingEffort: cfg.thinkingEffort,
     recentChats: cfg.recentChats,
     timeReminder: cfg.timeReminder,
-  }
+  }).settings
 }
 
 /** 把 `{{ message }}` 套进助手的消息模板；没配模板就原样返回。 */

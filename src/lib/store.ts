@@ -21,7 +21,7 @@ import {
 import { loadSettings, persistSettings } from './settings'
 import { findAssistant, resolveAssistantConfig } from './assistant'
 import { mirrorProviderFields, patchProvider, syncProviderToSettings } from './providers'
-import { webChatFallbackModel, webChatFallbackNotice } from './web-gate'
+import { applyWebGate, webGateNotice } from './web-gate'
 import { reconcileServers, setPolicyWriter } from './mcp-registry'
 import { memoryCount } from './memory'
 import { syncWebChatContext } from './web-context'
@@ -256,6 +256,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       } catch (error) {
         bootError = `读取设置失败：${describeError(error)}`
       }
+      /*
+       * 启动不走 setSettings（boot 直接 set 状态），所以闸门必须在这里也过一遍。
+       * 否则「上次关掉了纸雕虎鲸、但库里还存着网页账号」的设备，一开机又回到网页模式。
+       */
+      settings = applyWebGate(settings).settings
 
       let conversations: Conversation[] = []
       let memories: MemoryEntry[] = []
@@ -371,18 +376,18 @@ export const useAppStore = create<AppState>((set, get) => ({
         next = mirrorProviderFields(next)
       }
       /*
-       * 网页账号总闸（纸雕虎鲸）关着时，不能把模型留在 `deepseek-chat-web` 上。
-       *
-       * 那个选项在对话页已经被藏起来了，模型却还指着它的话，用户看不见自己在用什么，
-       * 而且仍然在走网页账号那条路 —— 正好是这次要收窄的东西。
-       * 放这里是因为 setSettings 是所有设置变更的唯一入口（助手页那个开关也走它）。
+       * 网页账号总闸（纸雕虎鲸）。关着时必须真正退出网页账号：只把模型换成 API 模型
+       * 是不够的 —— `isWebChatProvider` 是「模型是网页模型 **或** 供应商协议是
+       * deepseek-web」，只换模型会留下「界面显示 deepseek-flash、实际仍走网页账号」。
+       * 见 lib/web-gate.ts 的 applyWebGate。
        */
-      const fallbackModel = webChatFallbackModel(next)
-      if (fallbackModel !== null) next = { ...next, model: fallbackModel }
+      const gated = applyWebGate(next)
+      next = gated.settings
       set({ settings: next })
       await persistSettings(next)
-      // 切回模型这件事必须让用户看见：否则「模型自己变了」比「网页账号没了」更难解释。
-      if (fallbackModel !== null) get().actions.setNotice(webChatFallbackNotice(fallbackModel))
+      // 切走这件事必须让用户看见：否则「模型/供应商自己变了」比「网页账号没了」更难解释。
+      const gateNotice = webGateNotice(gated)
+      if (gateNotice !== null) get().actions.setNotice(gateNotice)
       if (patch.aquariumTheme !== undefined) stageBridge.current?.setTheme(next.aquariumTheme)
       // 助手设定 / 记忆相关变了，就把人设与记忆重新推给网页窗，
       // 否则网页账号那边还在用旧人设说话。
