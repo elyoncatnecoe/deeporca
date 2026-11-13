@@ -3,6 +3,7 @@ import { Check, Plus, Server, Trash2, Waves } from 'lucide-react'
 import { useAppStore } from '../lib/store'
 import { PROTOCOLS, PROTOCOL_LABEL, chatEndpoint } from '../lib/providers'
 import { WEB_CHAT_MODEL } from '../lib/models'
+import { webChatModelVisible } from '../lib/web-gate'
 import type { Provider, ProviderProtocol } from '../lib/types'
 import { IconButton, ListTextarea, ScreenHeader, Select, headerLines, parseHeaderLines } from './ui'
 import { ModelCatalog } from './ModelCatalog'
@@ -96,9 +97,16 @@ export function ProvidersScreen() {
           onBack={() => actions.setScreen('settings')}
           actions={(
             <div className="inline-actions">
-              <button type="button" className="ghost-button" onClick={addWebChat}>
-                <Waves size={16} /> 网页账号
-              </button>
+              {/*
+                网页账号供应商的入口跟着「纸雕虎鲸」开关走（见 lib/web-gate.ts）。
+                只藏对话页的模型选项、留着这个按钮的话，用户照样能在设置里手动建出
+                网页账号供应商 —— 等于没藏干净。
+              */}
+              {webChatModelVisible(settings) && (
+                <button type="button" className="ghost-button" onClick={addWebChat}>
+                  <Waves size={16} /> 网页账号
+                </button>
+              )}
               <button type="button" className="primary-button" onClick={add}>
                 <Plus size={16} /> 新建
               </button>

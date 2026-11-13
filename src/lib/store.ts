@@ -21,6 +21,7 @@ import {
 import { loadSettings, persistSettings } from './settings'
 import { findAssistant, resolveAssistantConfig } from './assistant'
 import { mirrorProviderFields, patchProvider, syncProviderToSettings } from './providers'
+import { webChatFallbackModel, webChatFallbackNotice } from './web-gate'
 import { reconcileServers, setPolicyWriter } from './mcp-registry'
 import { memoryCount } from './memory'
 import { syncWebChatContext } from './web-context'
@@ -369,8 +370,19 @@ export const useAppStore = create<AppState>((set, get) => ({
       } else if (patch.providers !== undefined) {
         next = mirrorProviderFields(next)
       }
+      /*
+       * 网页账号总闸（纸雕虎鲸）关着时，不能把模型留在 `deepseek-chat-web` 上。
+       *
+       * 那个选项在对话页已经被藏起来了，模型却还指着它的话，用户看不见自己在用什么，
+       * 而且仍然在走网页账号那条路 —— 正好是这次要收窄的东西。
+       * 放这里是因为 setSettings 是所有设置变更的唯一入口（助手页那个开关也走它）。
+       */
+      const fallbackModel = webChatFallbackModel(next)
+      if (fallbackModel !== null) next = { ...next, model: fallbackModel }
       set({ settings: next })
       await persistSettings(next)
+      // 切回模型这件事必须让用户看见：否则「模型自己变了」比「网页账号没了」更难解释。
+      if (fallbackModel !== null) get().actions.setNotice(webChatFallbackNotice(fallbackModel))
       if (patch.aquariumTheme !== undefined) stageBridge.current?.setTheme(next.aquariumTheme)
       // 助手设定 / 记忆相关变了，就把人设与记忆重新推给网页窗，
       // 否则网页账号那边还在用旧人设说话。
