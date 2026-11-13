@@ -34,6 +34,7 @@ import {
 import { MAX_ATTACHMENTS, attachmentKindLabel, formatFileSize, prepareAttachments } from '../lib/attachments'
 import { continueTurn, editAndResend, regenerateAtMessage, sendGroupMessage, sendMessage, stopSending } from '../lib/engine'
 import { WEB_CHAT_MODEL_INFO, isWebChatModel, modelInfo } from '../lib/models'
+import { webChatModelVisible } from '../lib/web-gate'
 import { visionOf, type VisionVerdict } from '../lib/capability'
 import { useAppStore, branchInfo, type SheetSize } from '../lib/store'
 import { currentProvider, hasApiKey, providerModels } from '../lib/providers'
@@ -95,11 +96,18 @@ function catalogModelOptions(settings: Settings): { id: string; hint: string; ta
     }
     return { id, hint, tags }
   })
-  // 当前模型不在目录里也要能看见、能选（例如手填的自定义模型名）。
-  if (settings.model !== '' && !options.some((option) => option.id === settings.model)) {
+  /*
+   * 当前模型不在目录里也要能看见、能选（例如手填的自定义模型名）。
+   *
+   * 网页账号模型不在此列：它出不出现只由「纸雕虎鲸」开关决定（见 lib/web-gate.ts）。
+   * 开关关着时哪怕 settings.model 还指着它（store 会把它切走，但可能有先后），
+   * 也不能从这里漏出来。
+   */
+  if (settings.model !== '' && !isWebChatModel(settings.model) && !options.some((option) => option.id === settings.model)) {
     options.unshift({ id: settings.model, hint: '目录外 ID，仍可直接发送', tags: ['目录外'] })
   }
-  if (!options.some((option) => option.id === WEB_CHAT_MODEL_INFO.id)) {
+  // 网页账号模型：跟着纸雕虎鲸开关走，默认不出现。
+  if (webChatModelVisible(settings) && !options.some((option) => option.id === WEB_CHAT_MODEL_INFO.id)) {
     options.push({ id: WEB_CHAT_MODEL_INFO.id, hint: WEB_CHAT_MODEL_INFO.hint, tags: [...WEB_CHAT_MODEL_INFO.tags] })
   }
   // 「看图」徽章统一在这里、由 visionOf 贴：判据和附件闸门是同一个函数，

@@ -3,6 +3,7 @@ import { Check, Plus, Server, Trash2, Waves } from 'lucide-react'
 import { useAppStore } from '../lib/store'
 import { PROTOCOLS, PROTOCOL_LABEL, chatEndpoint } from '../lib/providers'
 import { WEB_CHAT_MODEL } from '../lib/models'
+import { webChatModelVisible } from '../lib/web-gate'
 import type { Provider, ProviderProtocol } from '../lib/types'
 import { IconButton, ListTextarea, ScreenHeader, Select, headerLines, parseHeaderLines } from './ui'
 import { ModelCatalog } from './ModelCatalog'
@@ -24,7 +25,16 @@ export function ProvidersScreen() {
     setBatchOpen(false)
   }, [editingId])
 
-  const editing = settings.providers.find((item) => item.id === editingId) ?? null
+  /*
+   * 网页账号总闸（纸雕虎鲸）关着时，**已有的**网页账号供应商也不显示。
+   *
+   * 只藏「添加」按钮是不够的：列表里那条还在，用户点一下「切换」就又回到网页账号模式，
+   * 前面那些闸门全白做。数据不删 —— 重新打开纸雕虎鲸，这条就回来了。
+   */
+  const visibleProviders = settings.providers.filter(
+    (item) => webChatModelVisible(settings) || item.protocol !== 'deepseek-web',
+  )
+  const editing = visibleProviders.find((item) => item.id === editingId) ?? null
 
   const update = (patch: Partial<Provider>): void => {
     if (editing === null) return
@@ -96,9 +106,16 @@ export function ProvidersScreen() {
           onBack={() => actions.setScreen('settings')}
           actions={(
             <div className="inline-actions">
-              <button type="button" className="ghost-button" onClick={addWebChat}>
-                <Waves size={16} /> 网页账号
-              </button>
+              {/*
+                网页账号供应商的入口跟着「纸雕虎鲸」开关走（见 lib/web-gate.ts）。
+                只藏对话页的模型选项、留着这个按钮的话，用户照样能在设置里手动建出
+                网页账号供应商 —— 等于没藏干净。
+              */}
+              {webChatModelVisible(settings) && (
+                <button type="button" className="ghost-button" onClick={addWebChat}>
+                  <Waves size={16} /> 网页账号
+                </button>
+              )}
               <button type="button" className="primary-button" onClick={add}>
                 <Plus size={16} /> 新建
               </button>
@@ -110,7 +127,7 @@ export function ProvidersScreen() {
           <section className="settings-card">
             <h2><Server size={17} /> 全部供应商</h2>
             <div className="assistant-list">
-              {settings.providers.map((provider) => (
+              {visibleProviders.map((provider) => (
                 <div key={provider.id} className="assistant-row" data-active={provider.id === settings.providerId ? 'true' : undefined}>
                   <span className="assistant-avatar"><Server size={17} /></span>
                   <div className="assistant-meta">

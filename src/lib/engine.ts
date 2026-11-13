@@ -31,6 +31,7 @@ import { planGroupRound } from './group-chat'
 import { calendarToolDefinitions, isCalendarToolName, runCalendarTool } from './calendar-tools'
 import { mediaRefOf } from './media-store'
 import { currentProvider, isWebChatProvider } from './providers'
+import { applyWebGate } from './web-gate'
 import { webChatReady, loginWebChat, setWebChatContext } from './web-chat'
 import { buildWebChatContext } from './web-context'
 import { createTurnGate, type Turn } from './turn-gate'
@@ -602,14 +603,16 @@ async function runAssistantTurn(options: {
       : conversationConfig(options.settings, conversation)
     // 助手可以覆盖模型 / 温度 / 思考强度 / 回顾 / 时间提醒；没覆盖的跟随全局。
     // 但「全局选了网页账号」是账号模式，不许被助手/快照拽回 API 模型（真机 401 的根因）。
-    const settings: Settings = {
+    // 最后再过一道网页账号总闸：群聊里 respondAs 用的是**那个助手自己的**模型，
+    // 老对话用的是自己的快照，两条路都不经过模型选择器（见 lib/web-gate.ts）。
+    const settings: Settings = applyWebGate({
       ...options.settings,
       model: isWebChatModel(options.settings.model) ? options.settings.model : cfg.model,
       temperature: cfg.temperature,
       thinkingEffort: cfg.thinkingEffort,
       recentChats: cfg.recentChats,
       timeReminder: cfg.timeReminder,
-    }
+    }).settings
     // 走不走网页账号，以「这段对话实际用的模型」为准（和 streamChat 里的判断同源）。
     // 用全局设置判断会漏掉「对话快照是网页模型、全局已经切回 API」的情况。
     const webMode = isWebChatProvider(settings)
