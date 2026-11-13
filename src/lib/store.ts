@@ -391,7 +391,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (patch.aquariumTheme !== undefined) stageBridge.current?.setTheme(next.aquariumTheme)
       // 助手设定 / 记忆相关变了，就把人设与记忆重新推给网页窗，
       // 否则网页账号那边还在用旧人设说话。
-      if (patch.assistants !== undefined || patch.assistantId !== undefined || patch.memoryTokenBudget !== undefined) {
+      // assistantsEnabled 也要算进来：关掉助手时推一份空的，网页窗才会真的停用旧人设。
+      if (
+        patch.assistants !== undefined
+        || patch.assistantId !== undefined
+        || patch.memoryTokenBudget !== undefined
+        || patch.assistantsEnabled !== undefined
+      ) {
         void syncWebChatContext(next, get().memories).catch(() => undefined)
       }
       // MCP 配置变了就按新配置对齐连接（新增的连上、删掉的断开）。

@@ -10,6 +10,7 @@ import {
   WebApiError,
   abortWebSend,
   captureSessionFromWindow,
+  clearPersonaCache,
   diagnose,
   forgetWebSession,
   hasWebSession,
@@ -780,9 +781,18 @@ if (!singleInstance) {
 
     /** 写入人设/记忆前缀（用户改了助手设定后会再调一次，保持同步）。 */
     trustedHandle('webchat:context', async (_event, text: string) => {
+      const payload = typeof text === 'string' ? text.slice(0, 60_000) : ''
+      /*
+       * 空人设 = 助手被关掉了：先把 HTTP 链路那份「已经拼过」的标记清掉。
+       *
+       * 必须放在「网页窗没开就 return」之前 —— 窗口关着的时候恰恰最需要清：
+       * 不清的话，用户重新打开同一个助手、人设一个字都没变，去重会认为 A 已经拼过
+       * 而永远跳过，网页那边就一直用关掉之前的旧设定说话。
+       * 只清标记，sid / 历史消息都不动（旧消息本来也撤不回来）。
+       */
+      if (payload === '') clearPersonaCache()
       const win = liveWebChatWindow()
       if (win === null) return
-      const payload = typeof text === 'string' ? text.slice(0, 60_000) : ''
       try {
         await win.webContents.executeJavaScript(
           `(function(){

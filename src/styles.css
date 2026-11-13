@@ -2842,9 +2842,21 @@ button:disabled {
   min-height: 0;
   overflow-y: auto;
   padding: 16px;
-  /* 键盘弹起时只影响「滚动定位」，让聚焦的输入框自动滚到键盘上方；
-     不影响这个固定容器的尺寸，所以不会把布局压塌。 */
-  scroll-padding-bottom: calc(12px + var(--ime-inset, 0px));
+  /*
+   * 只留一点点余量，**不要**再把 --ime-inset 加进来。
+   *
+   * targetSdk 35 强制 edge-to-edge 之后，键盘弹起时窗口不再变矮，WebView 默认
+   * （interactive-widget=resizes-visual）只缩小「视觉视口」并把它整体上移，而
+   * .screen 是 position: fixed —— 固定定位元素不跟着平移，于是：
+   *   · 点进输入框，页面看起来「弹到顶部」；
+   *   · 拖回去以后，光标和画面错位（视觉视口还在偏移状态）。
+   * index.html 里改成 interactive-widget=resizes-content 后，布局视口本身会缩，
+   * 固定容器跟着缩，浏览器在缩小的视口里把输入框滚到键盘上方 —— 正确行为。
+   *
+   * 这时候如果还按 --ime-inset 预留一份底部内边距，等于把键盘高度算两遍：
+   * 滚动定位会把输入框推到几乎贴顶（用户看到的还是「弹到顶部」）。
+   */
+  scroll-padding-bottom: 12px;
 }
 
 .screen-footnote {
