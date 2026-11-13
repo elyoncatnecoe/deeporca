@@ -59,7 +59,7 @@ import { SpeechButton } from './SpeechButton'
 import { TurnNavigator } from './TurnNavigator'
 import { QuickCommands } from './QuickCommands'
 import { buildTurns } from '../lib/turns'
-import { Avatar, assistantAvatarProps, currentAssistantAvatar } from './Avatar'
+import { Avatar, assistantAvatarProps, messageAvatarProps } from './Avatar'
 import { Markdown } from './Markdown'
 import { IconButton, Modal, Spinner } from './ui'
 import { confirmDialog } from './ConfirmDialog'
@@ -292,16 +292,18 @@ function Bubble(props: {
   const assistants = useAppStore((state) => state.settings.assistants)
   // 取整个 settings 而不是在 selector 里算头像：selector 返回新对象会让 zustand 无限重渲染。
   const settings = useAppStore((state) => state.settings)
+  const conversation = useAppStore((state) => state.conversations.find((item) => item.id === props.conversationId))
   const speaker = message.assistantId === undefined
     ? undefined
     : assistants.find((item) => item.id === message.assistantId)
   const speakerName = message.assistantName ?? speaker?.name ?? assistantName
-  const speakerAvatar = speaker !== undefined ? assistantAvatarProps(speaker) : undefined
   /*
-   * 没有 speaker（老消息 / 单聊）时用哪个头像：助手开着就是当前助手的，
-   * 关掉才回落到设置里那张。以前这里直接画设置级，和上面 speaker 分支打架。
+   * 头像跟着「这条是谁说的」走：消息自带的 assistantId → 这段对话绑定的助手 → 设置级。
+   *
+   * 以前只按「当前助手」取，用户在同一个对话里换了助手，连历史消息的头像都会被改掉 ——
+   * 那些消息明明是上一个助手说的。现在历史用作者，只有正在生成的那条才用当前助手。
    */
-  const fallbackAvatar = currentAssistantAvatar(settings)
+  const avatarProps = messageAvatarProps({ settings, conversation, message, assistants })
   const regexesJson = useAppStore((state) => {
     const conversation = state.conversations.find((item) => item.id === state.activeId)
     return JSON.stringify(conversationConfig(state.settings, conversation).regexes)
@@ -460,11 +462,7 @@ function Bubble(props: {
         <div className="bubble-continued-divider" aria-hidden="true"><span>续写</span></div>
       ) : (
         <div className="bubble-author">
-          {speakerAvatar !== undefined ? (
-            <Avatar role="assistant" size={17} avatarSrc={speakerAvatar.avatarSrc} emoji={speakerAvatar.emoji} />
-          ) : (
-            <Avatar role="assistant" size={17} {...fallbackAvatar} />
-          )}
+          <Avatar role="assistant" size={17} {...(avatarProps ?? {})} />
           <span>{speakerName}</span>
           <time>{timeOf(message.createdAt)}</time>
           {message.status === 'error' && <em>出错</em>}
@@ -1406,8 +1404,8 @@ export function Chat() {
           {live !== null && live.conversationId === activeId && (
             <article className="bubble bubble-assistant bubble-live">
               <div className="bubble-author">
-                {/* 头像与名字必须同源：名字跟当前助手走，头像也得跟，否则就是「两个头像打架」。 */}
-                <Avatar role="assistant" size={17} {...currentAssistantAvatar(settings)} />
+                {/* 正在生成的那条属于「这段对话现在用的助手」，和上面的名字同源（activeConfig）。 */}
+                <Avatar role="assistant" size={17} {...assistantAvatarProps(activeConfig)} />
                 {/* 名字跟着当前助手走，别写死「深鲸」——切助手后这里要对得上。 */}
                 <span>{activeConfig.name}</span>
                 <em className="live-dot">{live.content.trim() !== '' ? '正在输入' : '正在思考'}</em>
