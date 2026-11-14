@@ -385,6 +385,21 @@ function webModeBootstrap(config: WebModeConfig, mountPetFn: typeof mountPet): v
 
   var REFUSAL_MARKERS = ['暂时无法回答', '换个话题', '无法提供', '无法回答', '无法满足']
 
+  /**
+   * 处理一行 SSE。命中审查时后端会补一帧把 fragments 整个换成 TEMPLATE_RESPONSE
+   * （见真实抓包：{"p":"fragments","v":[{"type":"TEMPLATE_RESPONSE",...}]}），前端照做就把
+   * 已渲染的真实回答覆盖成模板。这里把这一帧里的 fragments 替换补丁改成前端不认的
+   * 路径（等于丢弃），并把 CONTENT_FILTER 改成 FINISHED，真实回答就留住了。
+   */
+  function fixSseLine(line: string): string {
+    if (line.indexOf('data:') !== 0) return line
+    if (line.indexOf('TEMPLATE_RESPONSE') !== -1) {
+      var out = line.split('"p":"fragments"').join('"p":"__ds_fragments_ignored"')
+      return out.split('CONTENT_FILTER').join('FINISHED')
+    }
+    return line.split('CONTENT_FILTER').join('FINISHED')
+  }
+
   /** 最后一条助手气泡若显示的是审查模板、而我们抓到了真实回答，就把模板换成真实回答。 */
   function applyCapturedAnswer(): void {
     if (capturedAnswer === '') return
@@ -438,14 +453,21 @@ function webModeBootstrap(config: WebModeConfig, mountPetFn: typeof mountPet): v
           var reader = resp.body.getReader()
           var decoder = new TextDecoder()
           var encoder = new TextEncoder()
-          var carry = ''
+          var lineBuf = ''
           var rawAcc = ''
           var stream = new ReadableStream<Uint8Array>({
             start: function (controller: ReadableStreamDefaultController<Uint8Array>): void {
+              function emit(lines: string[]): void {
+                if (lines.length === 0) return
+                var out = ''
+                for (var li = 0; li < lines.length; li += 1) out += fixSseLine(lines[li]) + '\n'
+                controller.enqueue(encoder.encode(out))
+              }
               function pump(): void {
                 reader.read().then(function (chunk: ReadableStreamReadResult<Uint8Array>): void {
                   if (chunk.done) {
-                    if (carry !== '') controller.enqueue(encoder.encode(carry))
+                    if (lineBuf !== '') emit([lineBuf])
+                    lineBuf = ''
                     if (rawAcc !== '') {
                       var parsed = parseAnswerFromSse(rawAcc)
                       if (parsed !== '') capturedAnswer = parsed
@@ -455,20 +477,13 @@ function webModeBootstrap(config: WebModeConfig, mountPetFn: typeof mountPet): v
                     return
                   }
                   var value = chunk.value === undefined ? new Uint8Array(0) : chunk.value
-                  var text = carry + decoder.decode(value, { stream: true })
-                  rawAcc += text
-                  carry = ''
-                  // 保留可能是半个 CONTENT_FILTER 的尾巴，等下一段拼完整再改写。
-                  var keep = text.length
-                  for (var k = 1; k < MARK.length; k += 1) {
-                    if (text.slice(text.length - k) === MARK.slice(0, k)) {
-                      keep = text.length - k
-                      break
-                    }
-                  }
-                  carry = text.slice(keep)
-                  var out = text.slice(0, keep).split(MARK).join('FINISHED')
-                  if (out !== '') controller.enqueue(encoder.encode(out))
+                  var decoded = decoder.decode(value, { stream: true })
+                  rawAcc += decoded
+                  lineBuf += decoded
+                  var lines = lineBuf.split('\n')
+                  var tail = lines.pop()
+                  lineBuf = tail === undefined ? '' : tail
+                  emit(lines)
                   pump()
                 }).catch(function (error: unknown): void {
                   controller.error(error)
@@ -498,7 +513,15 @@ function webModeBootstrap(config: WebModeConfig, mountPetFn: typeof mountPet): v
             enumerable: desc !== undefined && desc.enumerable === true,
             get: function (this: XMLHttpRequest): string {
               var value = boundGetter.call(this)
-              return typeof value === 'string' ? value.split(MARK).join('FINISHED') : value
+              if (typeof value !== 'string' || value === '') return value
+              var cache = this as unknown as { __dsLen?: number; __dsOut?: string }
+              if (cache.__dsLen === value.length && typeof cache.__dsOut === 'string') return cache.__dsOut
+              var parts = value.split('\n')
+              for (var pi = 0; pi < parts.length; pi += 1) parts[pi] = fixSseLine(parts[pi])
+              var outValue = parts.join('\n')
+              cache.__dsLen = value.length
+              cache.__dsOut = outValue
+              return outValue
             },
           })
         }
