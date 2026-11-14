@@ -64,15 +64,7 @@ function webModeBootstrap(config: WebModeConfig, mountPetFn: typeof mountPet): v
    */
   var uncStats = { fetch: 0, xhr: 0, neutralized: 0 }
   function updateBadge(): void {
-    if (document.body === null) return
-    var el = document.getElementById('deepsea-unc-badge')
-    if (el === null) {
-      el = document.createElement('div')
-      el.id = 'deepsea-unc-badge'
-      el.style.cssText = 'position:fixed;left:6px;bottom:6px;z-index:2147483600;font:11px monospace;color:#fff;background:rgba(0,0,0,.55);padding:2px 5px;border-radius:6px;pointer-events:none;'
-      document.body.appendChild(el)
-    }
-    el.textContent = 'U f' + uncStats.fetch + ' x' + uncStats.xhr + ' n' + uncStats.neutralized
+    /* 正式版不显示诊断徽标（曾用于排查内容拦截走的 XHR 通道）。 */
   }
 
   function ensureStyle(): void {
@@ -187,30 +179,28 @@ function webModeBootstrap(config: WebModeConfig, mountPetFn: typeof mountPet): v
    */
   function placeAvatar(anchor: Element, image: HTMLImageElement, row: Element, role: string): void {
     /*
-     * 助手正文是满宽容器，左侧没有真正可借的空白；之前按「有空白就贴 negative left」摆，
-     * 会被正文/标题容器的 overflow 裁掉几个像素（老 bug 的回归）。助手头像一律走进
-     * padding 槽位：padding 属于盒子内部，任何祖先 overflow 都裁不到。用户气泡是右对齐
-     * 小块、左侧空白充足，继续用 negative left。
+     * 官方助手消息不带头像；本产品要保留。为了**不挤压正文**，头像只放进消息行「左侧已有的
+     * 留白」里（绝对定位，不改 padding/宽度）；留白不够就隐藏，绝不把正文挤窄，也不切边。
      */
-    if (role === 'assistant') {
-      image.setAttribute('data-av-inside', 'true')
-      anchor.setAttribute('data-av-gutter', 'true')
-      image.style.left = ''
+    if (role !== 'assistant') {
+      image.style.display = 'none'
       return
     }
+    var width = 27
     var anchorLeft = anchor.getBoundingClientRect().left
     var rowLeft = row.getBoundingClientRect().left
     var room = anchorLeft - rowLeft
-    if (room >= 30) {
-      var offset = Math.min(36, Math.floor(room) - 2)
-      image.removeAttribute('data-av-inside')
-      anchor.removeAttribute('data-av-gutter')
+    image.removeAttribute('data-av-inside')
+    anchor.removeAttribute('data-av-gutter')
+    image.style.left = ''
+    if (room >= width + 4) {
+      var offset = Math.min(34, Math.floor(room) - 2)
+      image.style.display = ''
       image.style.left = '-' + offset + 'px'
       return
     }
-    image.setAttribute('data-av-inside', 'true')
-    anchor.setAttribute('data-av-gutter', 'true')
-    image.style.left = ''
+    // 没有富余留白：隐藏头像，避免切边或挤占正文宽度。
+    image.style.display = 'none'
   }
 
   /** 消息列表那一层。首选虚拟列表的已渲染容器，兜底用 .ds-markdown 的公共祖先。 */
@@ -263,8 +253,12 @@ function webModeBootstrap(config: WebModeConfig, mountPetFn: typeof mountPet): v
     for (var i = 0; i < rows.length; i += 1) {
       var row = rows[i] as HTMLElement
       var role = roleOf(row)
-      // 用户行：空行（占位、过渡）跳过，免得给空气贴头像
-      if (role === 'user' && (row.textContent || '').replace(/\s+/g, '') === '') continue
+      // 用户气泡按官方样式不贴头像：清掉可能残留的，并跳过。
+      if (role === 'user') {
+        var staleUser = row.querySelector('.' + AV_CLASS)
+        if (staleUser !== null && staleUser.parentNode !== null) staleUser.parentNode.removeChild(staleUser)
+        continue
+      }
       if (row.getBoundingClientRect().height < 18) continue
       var anchor = anchorFor(row, role)
       if (anchor === null) continue

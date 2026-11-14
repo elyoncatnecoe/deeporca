@@ -418,6 +418,11 @@ function relayBootstrap(): void {
     // 等一拍再清：先让网页把这条读走，然后不管它自己清没清，我们都再清一次。
     window.setTimeout(clearInput, 120)
     window.setTimeout(clearInput, 600)
+    // 发送后去掉输入框残留的焦点/光标（深度思考等编辑区否则会留一条竖线）。
+    window.setTimeout(function (): void {
+      var focusInput = queryFirst(INPUT_SELECTORS)
+      if (focusInput instanceof HTMLElement) focusInput.blur()
+    }, 700)
     if (pollTimer !== 0) window.clearTimeout(pollTimer)
     pollTimer = window.setTimeout(tick, 600)
     return true
