@@ -380,6 +380,29 @@ function webModeBootstrap(config: WebModeConfig, mountPetFn: typeof mountPet): v
         }
       })
     } as typeof fetch
+
+    // 有些前端用 XHR（axios 的 xhr 适配器）跑 SSE。给 responseText 套一层 getter，
+    // 读出来的内容里同样把 CONTENT_FILTER 换成 FINISHED —— 站点自己解析时就会当成正常结束。
+    try {
+      var xhrProto = window.XMLHttpRequest && window.XMLHttpRequest.prototype
+      if (xhrProto !== undefined && xhrProto !== null) {
+        var desc = Object.getOwnPropertyDescriptor(xhrProto, 'responseText')
+        var getter = desc === undefined ? undefined : (desc.get as ((this: XMLHttpRequest) => string) | undefined)
+        if (getter !== undefined) {
+          var boundGetter: (this: XMLHttpRequest) => string = getter
+          Object.defineProperty(xhrProto, 'responseText', {
+            configurable: true,
+            enumerable: desc !== undefined && desc.enumerable === true,
+            get: function (this: XMLHttpRequest): string {
+              var value = boundGetter.call(this)
+              return typeof value === 'string' ? value.split(MARK).join('FINISHED') : value
+            },
+          })
+        }
+      }
+    } catch (error) {
+      /* 改不了就算了，不打断 fetch 那条路 */
+    }
   }
 
   function mountPetOnce(): void {
