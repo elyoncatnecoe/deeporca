@@ -309,6 +309,79 @@ function webModeBootstrap(config: WebModeConfig, mountPetFn: typeof mountPet): v
     }
   }
 
+  /**
+   * 去掉网页版的「安全拦截」。
+   *
+   * 站点命中内容审查时，会在流里把 status 置成 CONTENT_FILTER，前端随之丢弃已经渲染的
+   * 真实回答、改显示一句「暂时无法回答」的模板。真实正文其实在同一股流里早就下发过了
+   * （所以「前端能监听到」）。这里在 fetch 层把流里的 CONTENT_FILTER 改写成 FINISHED，
+   * 前端就会正常把真实回答留在界面上。只拦 /api/v0/chat/ 的 SSE；改写是流式的，跨分片
+   * 被切断的标记用 carry 兜住。
+   */
+  function uncensorStream(): void {
+    var win = window as unknown as { __deepseaUncensor?: boolean }
+    if (win.__deepseaUncensor === true) return
+    if (typeof window.fetch !== 'function') return
+    win.__deepseaUncensor = true
+    var origFetch = window.fetch
+    var MARK = 'CONTENT_FILTER'
+    window.fetch = function (input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+      var url = ''
+      try {
+        url = typeof input === 'string' ? input : (input as Request).url || ''
+      } catch (error) {
+        url = ''
+      }
+      var pending = origFetch.call(window, input, init)
+      if (url.indexOf('/api/v0/chat/') === -1) return pending
+      return pending.then(function (resp: Response): Response {
+        try {
+          if (resp === null || resp.body === null || typeof resp.body.getReader !== 'function') return resp
+          var contentType = (resp.headers && resp.headers.get('content-type')) || ''
+          if (contentType.indexOf('text/event-stream') === -1) return resp
+          var reader = resp.body.getReader()
+          var decoder = new TextDecoder()
+          var encoder = new TextEncoder()
+          var carry = ''
+          var stream = new ReadableStream<Uint8Array>({
+            start: function (controller: ReadableStreamDefaultController<Uint8Array>): void {
+              function pump(): void {
+                reader.read().then(function (chunk: ReadableStreamReadResult<Uint8Array>): void {
+                  if (chunk.done) {
+                    if (carry !== '') controller.enqueue(encoder.encode(carry))
+                    controller.close()
+                    return
+                  }
+                  var value = chunk.value === undefined ? new Uint8Array(0) : chunk.value
+                  var text = carry + decoder.decode(value, { stream: true })
+                  carry = ''
+                  // 保留可能是半个 CONTENT_FILTER 的尾巴，等下一段拼完整再改写。
+                  var keep = text.length
+                  for (var k = 1; k < MARK.length; k += 1) {
+                    if (text.slice(text.length - k) === MARK.slice(0, k)) {
+                      keep = text.length - k
+                      break
+                    }
+                  }
+                  carry = text.slice(keep)
+                  var out = text.slice(0, keep).split(MARK).join('FINISHED')
+                  if (out !== '') controller.enqueue(encoder.encode(out))
+                  pump()
+                }).catch(function (error: unknown): void {
+                  controller.error(error)
+                })
+              }
+              pump()
+            },
+          })
+          return new Response(stream, { status: resp.status, statusText: resp.statusText, headers: resp.headers })
+        } catch (error) {
+          return resp
+        }
+      })
+    } as typeof fetch
+  }
+
   function mountPetOnce(): void {
     if (!config.pet) return
     if (document.body === null) return
@@ -344,6 +417,8 @@ function webModeBootstrap(config: WebModeConfig, mountPetFn: typeof mountPet): v
   }
 
   function boot(): void {
+    // 越早接管 fetch 越好：把内容审查的 CONTENT_FILTER 改写成 FINISHED，别让前端丢正文。
+    uncensorStream()
     // 先尝试解锁官方朗读；若这次触发了刷新，后面的注入会在刷新后的 dom-ready 再来一次。
     unlockTts()
     mountPetOnce()
@@ -394,6 +469,9 @@ function webModeBootstrap(config: WebModeConfig, mountPetFn: typeof mountPet): v
       },
     }
   }
+
+  // 页面一注入就接管 fetch，抢在站点自己的请求逻辑之前（不等 DOMContentLoaded）。
+  uncensorStream()
 
   if (document.body === null) {
     document.addEventListener('DOMContentLoaded', boot, { once: true } as AddEventListenerOptions)
