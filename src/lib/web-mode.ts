@@ -76,16 +76,12 @@ function webModeBootstrap(config: WebModeConfig, mountPetFn: typeof mountPet): v
       // overflow:visible 很关键：助手正文容器（.ds-markdown 之类）常带
       // overflow-x:auto 给代码块用，而头像是绝对定位在它里面的，
       // 一旦被它裁掉就表现为「头像被切边、露在框外」。
-      '.' + AV_CLASS + '{position:absolute;top:2px;left:-36px;width:27px;height:27px;border-radius:0 !important;',
-      'object-fit:contain;pointer-events:none;user-select:none;background:transparent !important;',
-      'background-color:transparent !important;border:0 !important;box-shadow:none !important;z-index:2;}',
-      '.' + AV_CLASS + '[data-default="true"]{object-fit:contain;border-radius:0 !important;filter:none !important;}',
-      '.' + ANCHOR_CLASS + '{position:relative !important;overflow:visible !important;}',
-      // 左侧没有空白可借用时（助手正文一般贴着消息列左边缘），给锚点留出
-      // 34px 的槽位，把头像放进 padding 里 —— padding 属于盒子内部，
-      // 即使祖先 overflow:hidden 也裁不到它。
-      '.' + ANCHOR_CLASS + '[data-av-gutter="true"]{padding-left:34px !important;box-sizing:border-box !important;}',
-      '.' + AV_CLASS + '[data-av-inside="true"]{left:0 !important;}',
+      // 每条消息「上方」的头像行：正常文档流，只占纵向空间，不挤正文、也不会被祖先 overflow 裁掉。
+      '.' + AV_CLASS + '{width:26px;height:26px;display:block;border-radius:0 !important;object-fit:contain;',
+      'pointer-events:none;user-select:none;background:transparent !important;border:0 !important;box-shadow:none !important;}',
+      '.deepsea-av-head{display:flex;width:100%;margin:0 0 2px 0;pointer-events:none;}',
+      '.deepsea-av-head[data-role="assistant"]{justify-content:flex-start;}',
+      '.deepsea-av-head[data-role="user"]{justify-content:flex-end;}',
       // 解除「内容安全」的前端遮挡：站点只用 CSS 把正文模糊/透明/文字遮罩掉，原文仍在
       // DOM 里。这里强制还原最常见几种遮挡（正常内容本来就是 none，不受影响）。
       '.ds-markdown, .ds-markdown *{filter:none !important;-webkit-text-security:none !important;text-shadow:none !important;}',
@@ -165,42 +161,36 @@ function webModeBootstrap(config: WebModeConfig, mountPetFn: typeof mountPet): v
   }
 
   /**
-   * 摆放头像：先量「锚点左边还有多少空白」，再决定贴在左侧还是挪进 padding。
-   *
-   * 以前写死 `left:-36px`，等于默认「左侧一定有 36px 空白」。但助手正文容器
-   * （.ds-assistant-message-main-content / .ds-markdown）通常是贴着消息列左边缘
-   * 开始的，根本没有空白 —— 头像被顶到列外，被滚动容器或 markdown 的
-   * overflow 裁掉一半，看起来就是「头像切边、露在框外」。
-   *
-   * 现在改成自适应：
-   *   · 左侧空白 ≥ 30px：照旧贴在左边，偏移量夹在空白内，不会越界；
-   *   · 否则：给锚点加 data-av-gutter（padding-left:34px），头像 left:0 落在
-   *     padding 里。padding 属于盒子内部，祖先 overflow:hidden 也裁不到它。
+   * 在每条消息「上方」放一个头像行（助手左对齐、用户右对齐）。
+   * 走正常文档流，只增加纵向空间，不挤压正文宽度、也不会被祖先 overflow 裁掉。
    */
-  function placeAvatar(anchor: Element, image: HTMLImageElement, row: Element, role: string): void {
-    /*
-     * 官方助手消息不带头像；本产品要保留。为了**不挤压正文**，头像只放进消息行「左侧已有的
-     * 留白」里（绝对定位，不改 padding/宽度）；留白不够就隐藏，绝不把正文挤窄，也不切边。
-     */
-    if (role !== 'assistant') {
-      image.style.display = 'none'
-      return
+  function ensureAvatarHead(row: Element, role: string): void {
+    // 优先插进 .ds-message（消息内容的块容器），这样头像贴着内容区、对齐更自然；
+    // 没有 .ds-message 才退回插到行首。
+    var msg = row.querySelector('.ds-message')
+    var host: Element = msg === null ? row : msg
+    var head: HTMLElement | null = null
+    for (var c = host.firstElementChild; c !== null; c = c.nextElementSibling) {
+      if (c.classList.contains('deepsea-av-head')) {
+        head = c as HTMLElement
+        break
+      }
     }
-    var width = 27
-    var anchorLeft = anchor.getBoundingClientRect().left
-    var rowLeft = row.getBoundingClientRect().left
-    var room = anchorLeft - rowLeft
-    image.removeAttribute('data-av-inside')
-    anchor.removeAttribute('data-av-gutter')
-    image.style.left = ''
-    if (room >= width + 4) {
-      var offset = Math.min(34, Math.floor(room) - 2)
-      image.style.display = ''
-      image.style.left = '-' + offset + 'px'
-      return
+    if (head === null) {
+      head = document.createElement('div')
+      head.className = 'deepsea-av-head'
+      host.insertBefore(head, host.firstChild)
     }
-    // 没有富余留白：隐藏头像，避免切边或挤占正文宽度。
-    image.style.display = 'none'
+    head.setAttribute('data-role', role)
+    var image = head.querySelector('.' + AV_CLASS) as HTMLImageElement | null
+    if (image === null) {
+      image = makeAvatar(role)
+      head.appendChild(image)
+    } else if (image.getAttribute('data-role') !== role) {
+      image.setAttribute('data-role', role)
+      image.setAttribute('data-default', isDefault(role) ? 'true' : 'false')
+      image.src = source(role)
+    }
   }
 
   /** 消息列表那一层。首选虚拟列表的已渲染容器，兜底用 .ds-markdown 的公共祖先。 */
@@ -248,45 +238,32 @@ function webModeBootstrap(config: WebModeConfig, mountPetFn: typeof mountPet): v
     if (list === null) return
     ensureStyle()
 
-    var anchors: Element[] = []
     var rows = list.children
     for (var i = 0; i < rows.length; i += 1) {
       var row = rows[i] as HTMLElement
-      var role = roleOf(row)
-      // 用户气泡按官方样式不贴头像：清掉可能残留的，并跳过。
-      if (role === 'user') {
-        var staleUser = row.querySelector('.' + AV_CLASS)
-        if (staleUser !== null && staleUser.parentNode !== null) staleUser.parentNode.removeChild(staleUser)
-        continue
-      }
+      // 只处理真正的消息行（有 ds-message 或 ds-markdown），空占位行跳过。
+      if (row.querySelector('.ds-message') === null && row.querySelector('.ds-markdown') === null) continue
       if (row.getBoundingClientRect().height < 18) continue
-      var anchor = anchorFor(row, role)
-      if (anchor === null) continue
-      anchors.push(anchor)
-
-      var image = anchor.querySelector('.' + AV_CLASS) as HTMLImageElement | null
-      if (image === null) {
-        markAnchor(anchor)
-        image = makeAvatar(role)
-        anchor.appendChild(image)
-      } else if (image.getAttribute('data-role') !== role) {
-        // 虚拟列表会复用行，角色换了就换图
-        image.setAttribute('data-role', role)
-        image.setAttribute('data-default', isDefault(role) ? 'true' : 'false')
-        image.src = source(role)
-      }
-      markAnchor(anchor)
-      // 每轮都重新摆一次：布局变了（窗口缩放、换行、站点改版）也能自己纠正。
-      placeAvatar(anchor, image, row, role)
+      ensureAvatarHead(row, roleOf(row))
     }
 
-    // 清掉被复用到别处、已经不挂在锚点上的旧头像
+    // 清掉不属于头像行的旧头像（旧版绝对定位遗留）
     var all = document.querySelectorAll('.' + AV_CLASS)
     for (var k = 0; k < all.length; k += 1) {
       var node = all[k]
       var parent = node.parentElement
       if (parent === null) continue
-      if (anchors.indexOf(parent) === -1 && parent.parentNode !== null) parent.removeChild(node)
+      if (!parent.classList.contains('deepsea-av-head') && parent.parentNode !== null) parent.removeChild(node)
+    }
+    // 清掉挂在非消息行上的头像行
+    var heads = document.querySelectorAll('.deepsea-av-head')
+    for (var h = 0; h < heads.length; h += 1) {
+      var headEl = heads[h]
+      var hostRow = headEl.closest('[data-virtual-list-item-key]')
+      if (hostRow === null) continue
+      if (hostRow.querySelector('.ds-message') === null && hostRow.querySelector('.ds-markdown') === null && headEl.parentNode !== null) {
+        headEl.parentNode.removeChild(headEl)
+      }
     }
   }
 
