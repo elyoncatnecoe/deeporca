@@ -309,6 +309,102 @@ function webModeBootstrap(config: WebModeConfig, mountPetFn: typeof mountPet): v
     }
   }
 
+  /** 最近一次聊天补全里解析出来的「真实回答」（RESPONSE 片段），用于在页面被模板替换时救回来。 */
+  var capturedAnswer = ''
+
+  /** 从原始 SSE 文本里解析出 RESPONSE 正文（对齐 electron/sse.ts 的 PatchReader，够用即可）。 */
+  function parseAnswerFromSse(raw: string): string {
+    var text = ''
+    var lastKind = 'RESPONSE'
+    function isThinking(kind: string): boolean {
+      var k = kind.toUpperCase()
+      return k === 'THINK' || k === 'THINKING' || k === 'REASONING' || k === 'SEARCH' || k.indexOf('TOOL') === 0
+    }
+    function append(kind: unknown, content: unknown): void {
+      if (typeof content !== 'string' || content === '') return
+      if (isThinking(String(kind === undefined ? '' : kind))) return
+      text += content
+    }
+    function frags(list: unknown): void {
+      if (!Array.isArray(list)) return
+      for (var i = 0; i < list.length; i += 1) {
+        var it = list[i] as Record<string, unknown> | null
+        if (it === null || typeof it !== 'object') continue
+        if (typeof it.type === 'string') lastKind = it.type
+        if (typeof it.content === 'string') append(it.type, it.content)
+      }
+    }
+    function patch(p: string, o: unknown, v: unknown): void {
+      if (/^response\/fragments$/.test(p) && Array.isArray(v)) {
+        frags(v)
+        return
+      }
+      if (/^response\/fragments\/-1\//.test(p) && typeof v === 'string' && (o === 'APPEND' || o === 'SET' || o === undefined)) {
+        append(lastKind, v)
+      }
+      var asRecord = v as Record<string, unknown> | null
+      if (asRecord !== null && typeof asRecord === 'object' && Array.isArray(asRecord.fragments)) frags(asRecord.fragments)
+    }
+    function tree(v: unknown): void {
+      var rec = v as Record<string, unknown>
+      var inner = rec.v as Record<string, unknown> | undefined
+      var r = (rec.response || (inner !== undefined ? inner.response : undefined)) as Record<string, unknown> | undefined
+      if (r !== undefined && r !== null && typeof r === 'object' && Array.isArray(r.fragments)) frags(r.fragments)
+    }
+    function applyFrame(f: unknown): void {
+      if (f === null || typeof f !== 'object') return
+      var rec = f as Record<string, unknown>
+      if (typeof rec.p === 'string') {
+        patch(rec.p, rec.o, rec.v)
+        return
+      }
+      if (typeof rec.v === 'string') {
+        append(lastKind, rec.v)
+        return
+      }
+      if (rec.v !== null && typeof rec.v === 'object') tree(rec.v)
+    }
+    try {
+      var lines = raw.split('\n')
+      for (var i = 0; i < lines.length; i += 1) {
+        var line = lines[i]
+        if (line.indexOf('data:') !== 0) continue
+        var payload = line.slice(5).trim()
+        if (payload === '' || payload === '[DONE]') continue
+        try {
+          applyFrame(JSON.parse(payload))
+        } catch (error) {
+          /* 半帧，跳过 */
+        }
+      }
+    } catch (error) {
+      return ''
+    }
+    return text
+  }
+
+  var REFUSAL_MARKERS = ['暂时无法回答', '换个话题', '无法提供', '无法回答', '无法满足']
+
+  /** 最后一条助手气泡若显示的是审查模板、而我们抓到了真实回答，就把模板换成真实回答。 */
+  function applyCapturedAnswer(): void {
+    if (capturedAnswer === '') return
+    var marks = document.querySelectorAll('.ds-markdown')
+    if (marks.length === 0) return
+    var last = marks[marks.length - 1] as HTMLElement
+    var current = last.textContent === null ? '' : last.textContent
+    // 只处理「短模板」：正常长回答里也可能出现「抱歉」之类的词，别误替换。
+    if (current.length > 120) return
+    var hit = false
+    for (var i = 0; i < REFUSAL_MARKERS.length; i += 1) {
+      if (current.indexOf(REFUSAL_MARKERS[i]) !== -1) {
+        hit = true
+        break
+      }
+    }
+    if (!hit || current === capturedAnswer) return
+    last.textContent = capturedAnswer
+  }
+
   /**
    * 去掉网页版的「安全拦截」。
    *
@@ -343,17 +439,24 @@ function webModeBootstrap(config: WebModeConfig, mountPetFn: typeof mountPet): v
           var decoder = new TextDecoder()
           var encoder = new TextEncoder()
           var carry = ''
+          var rawAcc = ''
           var stream = new ReadableStream<Uint8Array>({
             start: function (controller: ReadableStreamDefaultController<Uint8Array>): void {
               function pump(): void {
                 reader.read().then(function (chunk: ReadableStreamReadResult<Uint8Array>): void {
                   if (chunk.done) {
                     if (carry !== '') controller.enqueue(encoder.encode(carry))
+                    if (rawAcc !== '') {
+                      var parsed = parseAnswerFromSse(rawAcc)
+                      if (parsed !== '') capturedAnswer = parsed
+                      rawAcc = ''
+                    }
                     controller.close()
                     return
                   }
                   var value = chunk.value === undefined ? new Uint8Array(0) : chunk.value
                   var text = carry + decoder.decode(value, { stream: true })
+                  rawAcc += text
                   carry = ''
                   // 保留可能是半个 CONTENT_FILTER 的尾巴，等下一段拼完整再改写。
                   var keep = text.length
@@ -402,6 +505,46 @@ function webModeBootstrap(config: WebModeConfig, mountPetFn: typeof mountPet): v
       }
     } catch (error) {
       /* 改不了就算了，不打断 fetch 那条路 */
+    }
+
+    // XHR 流式：load 时把整段响应原文也解析一遍，抓到真实回答就存起来。
+    try {
+      var proto2 = window.XMLHttpRequest && window.XMLHttpRequest.prototype
+      if (proto2 !== undefined && proto2 !== null) {
+        var origOpen = proto2.open
+        if (typeof origOpen === 'function') {
+          proto2.open = function (this: XMLHttpRequest, method: string, url: string | URL, ...rest: unknown[]): void {
+            ;(this as unknown as { __deepseaUrl?: string }).__deepseaUrl = String(url)
+            ;(origOpen as (...a: unknown[]) => void).apply(this, [method, url, ...rest])
+          } as unknown as typeof origOpen
+        }
+        var origSend = proto2.send
+        if (typeof origSend === 'function') {
+          proto2.send = function (this: XMLHttpRequest, ...args: unknown[]): void {
+            var xhr = this
+            try {
+              xhr.addEventListener('load', function (): void {
+                try {
+                  var u = String((xhr as unknown as { __deepseaUrl?: string }).__deepseaUrl || '')
+                  if (u.indexOf('/api/v0/chat/') === -1) return
+                  var body = xhr.responseText
+                  if (typeof body === 'string' && body !== '') {
+                    var parsed = parseAnswerFromSse(body)
+                    if (parsed !== '') capturedAnswer = parsed
+                  }
+                } catch (error) {
+                  /* 忽略 */
+                }
+              })
+            } catch (error) {
+              /* 忽略 */
+            }
+            ;(origSend as (...a: unknown[]) => void).apply(this, args)
+          } as unknown as typeof origSend
+        }
+      }
+    } catch (error) {
+      /* 忽略 */
     }
   }
 
@@ -456,6 +599,7 @@ function webModeBootstrap(config: WebModeConfig, mountPetFn: typeof mountPet): v
         scheduled = false
         syncAvatars()
         revealCensored()
+        applyCapturedAnswer()
         mountPetOnce()
       }, 500)
     })
@@ -465,6 +609,7 @@ function webModeBootstrap(config: WebModeConfig, mountPetFn: typeof mountPet): v
     window.setInterval(function (): void {
       syncAvatars()
       revealCensored()
+      applyCapturedAnswer()
       mountPetOnce()
     }, 4000)
 
@@ -472,6 +617,10 @@ function webModeBootstrap(config: WebModeConfig, mountPetFn: typeof mountPet): v
       sync: syncAvatars,
       /** 手动解除内容遮挡（控制台里调一下，遇到拦截时立刻还原一次）。 */
       reveal: revealCensored,
+      /** 抓到并解析出的「真实回答」，排查用。 */
+      raw: function (): string {
+        return capturedAnswer
+      },
       /** 控制台里 deepseaAvatars.dump() 能看到认了几行、认成什么角色 —— 排查用。 */
       dump: function (): unknown {
         var list = rowList()
