@@ -385,17 +385,43 @@ function webModeBootstrap(config: WebModeConfig, mountPetFn: typeof mountPet): v
 
   var REFUSAL_MARKERS = ['暂时无法回答', '换个话题', '无法提供', '无法回答', '无法满足']
 
+  /** 递归剔掉审查帧里的「用 TEMPLATE_RESPONSE 覆盖 fragments」补丁，并把审查状态改成 FINISHED。 */
+  function stripCensor(node: any): any {
+    if (Array.isArray(node)) {
+      var out: any[] = []
+      for (var i = 0; i < node.length; i += 1) {
+        var item = node[i]
+        if (item !== null && typeof item === 'object' && typeof item.p === 'string' && /(^|\/)fragments$/.test(item.p)) continue
+        out.push(stripCensor(item))
+      }
+      return out
+    }
+    if (node !== null && typeof node === 'object') {
+      for (var k in node) {
+        if (Object.prototype.hasOwnProperty.call(node, k)) node[k] = stripCensor(node[k])
+      }
+      if ((node.p === 'status' || node.p === 'quasi_status') && node.v === 'CONTENT_FILTER') node.v = 'FINISHED'
+      return node
+    }
+    return node
+  }
+
   /**
    * 处理一行 SSE。命中审查时后端会补一帧把 fragments 整个换成 TEMPLATE_RESPONSE
-   * （见真实抓包：{"p":"fragments","v":[{"type":"TEMPLATE_RESPONSE",...}]}），前端照做就把
-   * 已渲染的真实回答覆盖成模板。这里把这一帧里的 fragments 替换补丁改成前端不认的
-   * 路径（等于丢弃），并把 CONTENT_FILTER 改成 FINISHED，真实回答就留住了。
+   * （见真实抓包最后一帧），前端照做就把已渲染的真实回答覆盖成模板。这里把这一帧
+   * 结构化成 JSON 后，**直接删掉这条 fragments 覆盖补丁**、状态改 FINISHED，真实回答就留住了。
+   * 其它帧（真实回答的 data: 帧）原样放行。
    */
   function fixSseLine(line: string): string {
     if (line.indexOf('data:') !== 0) return line
     if (line.indexOf('TEMPLATE_RESPONSE') !== -1) {
-      var out = line.split('"p":"fragments"').join('"p":"__ds_fragments_ignored"')
-      return out.split('CONTENT_FILTER').join('FINISHED')
+      var payload = line.slice(5).trim()
+      try {
+        var obj = JSON.parse(payload)
+        return 'data: ' + JSON.stringify(stripCensor(obj))
+      } catch (error) {
+        return line.split('CONTENT_FILTER').join('FINISHED')
+      }
     }
     return line.split('CONTENT_FILTER').join('FINISHED')
   }
