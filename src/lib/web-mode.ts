@@ -57,6 +57,24 @@ function webModeBootstrap(config: WebModeConfig, mountPetFn: typeof mountPet): v
   var AV_CLASS = 'deepsea-av'
   var ANCHOR_CLASS = 'deepsea-anchor'
 
+  /**
+   * 内容拦截绕过的运行时统计，显示在左下角小徽标上，方便真机截图排查：
+   *   U f<fetch 次数> x<xhr 次数> n<命中审查帧次数>
+   * 若 f/x 都是 0，说明请求没走我们拦到的 fetch/XHR（可能被站点提前缓存或走了 worker）。
+   */
+  var uncStats = { fetch: 0, xhr: 0, neutralized: 0 }
+  function updateBadge(): void {
+    if (document.body === null) return
+    var el = document.getElementById('deepsea-unc-badge')
+    if (el === null) {
+      el = document.createElement('div')
+      el.id = 'deepsea-unc-badge'
+      el.style.cssText = 'position:fixed;left:6px;bottom:6px;z-index:2147483600;font:11px monospace;color:#fff;background:rgba(0,0,0,.55);padding:2px 5px;border-radius:6px;pointer-events:none;'
+      document.body.appendChild(el)
+    }
+    el.textContent = 'U f' + uncStats.fetch + ' x' + uncStats.xhr + ' n' + uncStats.neutralized
+  }
+
   function ensureStyle(): void {
     if (document.getElementById(STYLE_ID) !== null) return
     if (document.head === null) return
@@ -415,6 +433,8 @@ function webModeBootstrap(config: WebModeConfig, mountPetFn: typeof mountPet): v
   function fixSseLine(line: string): string {
     if (line.indexOf('data:') !== 0) return line
     if (line.indexOf('TEMPLATE_RESPONSE') !== -1) {
+      uncStats.neutralized += 1
+      updateBadge()
       var payload = line.slice(5).trim()
       try {
         var obj = JSON.parse(payload)
@@ -471,6 +491,8 @@ function webModeBootstrap(config: WebModeConfig, mountPetFn: typeof mountPet): v
       }
       var pending = origFetch.call(window, input, init)
       if (url.indexOf('/api/v0/chat/') === -1) return pending
+      uncStats.fetch += 1
+      updateBadge()
       return pending.then(function (resp: Response): Response {
         try {
           if (resp === null || resp.body === null || typeof resp.body.getReader !== 'function') return resp
@@ -576,6 +598,8 @@ function webModeBootstrap(config: WebModeConfig, mountPetFn: typeof mountPet): v
                 try {
                   var u = String((xhr as unknown as { __deepseaUrl?: string }).__deepseaUrl || '')
                   if (u.indexOf('/api/v0/chat/') === -1) return
+                  uncStats.xhr += 1
+                  updateBadge()
                   var body = xhr.responseText
                   if (typeof body === 'string' && body !== '') {
                     var parsed = parseAnswerFromSse(body)
@@ -632,6 +656,7 @@ function webModeBootstrap(config: WebModeConfig, mountPetFn: typeof mountPet): v
   }
 
   function boot(): void {
+    updateBadge()
     // 越早接管 fetch 越好：把内容审查的 CONTENT_FILTER 改写成 FINISHED，别让前端丢正文。
     uncensorStream()
     // 先尝试解锁官方朗读；若这次触发了刷新，后面的注入会在刷新后的 dom-ready 再来一次。
