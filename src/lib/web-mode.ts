@@ -419,6 +419,8 @@ function webModeBootstrap(config: WebModeConfig, mountPetFn: typeof mountPet): v
         if (Object.prototype.hasOwnProperty.call(node, k)) node[k] = stripCensor(node[k])
       }
       if ((node.p === 'status' || node.p === 'quasi_status') && node.v === 'CONTENT_FILTER') node.v = 'FINISHED'
+      // 顺手解除「禁止重新生成」，让被拦这条还能刷新。
+      if (node.p === 'ban_regenerate' && node.v === true) node.v = false
       return node
     }
     return node
@@ -446,24 +448,57 @@ function webModeBootstrap(config: WebModeConfig, mountPetFn: typeof mountPet): v
     return line.split('CONTENT_FILTER').join('FINISHED')
   }
 
-  /** 最后一条助手气泡若显示的是审查模板、而我们抓到了真实回答，就把模板换成真实回答。 */
+  /** 真实回答按「消息行 key」存本地，重进页面时用来把模板换回来。 */
+  var REAL_PREFIX = 'deepseaReal:'
+
+  function rowKeyOf(el: Element): string {
+    var row = el.closest('[data-virtual-list-item-key]')
+    if (row === null) return ''
+    var key = row.getAttribute('data-virtual-list-item-key')
+    return key === null ? '' : key
+  }
+
+  function isRefusalText(text: string): boolean {
+    if (text.length > 160) return false
+    for (var i = 0; i < REFUSAL_MARKERS.length; i += 1) {
+      if (text.indexOf(REFUSAL_MARKERS[i]) !== -1) return true
+    }
+    return false
+  }
+
+  /**
+   * 两件事：
+   *  1) 把最后一条「正常回答」按消息 key 存进 localStorage；
+   *  2) 任何显示成审查模板的气泡，用存过的真实回答换回来（退出重进也能恢复）。
+   */
   function applyCapturedAnswer(): void {
-    if (capturedAnswer === '') return
     var marks = document.querySelectorAll('.ds-markdown')
     if (marks.length === 0) return
     var last = marks[marks.length - 1] as HTMLElement
-    var current = last.textContent === null ? '' : last.textContent
-    // 只处理「短模板」：正常长回答里也可能出现「抱歉」之类的词，别误替换。
-    if (current.length > 120) return
-    var hit = false
-    for (var i = 0; i < REFUSAL_MARKERS.length; i += 1) {
-      if (current.indexOf(REFUSAL_MARKERS[i]) !== -1) {
-        hit = true
-        break
+    for (var i = 0; i < marks.length; i += 1) {
+      var el = marks[i] as HTMLElement
+      var text = el.textContent === null ? '' : el.textContent
+      var key = rowKeyOf(el)
+      if (el === last && text.trim() !== '' && !isRefusalText(text)) {
+        if (key !== '') {
+          try {
+            window.localStorage.setItem(REAL_PREFIX + key, text)
+          } catch (error) {
+            /* 存不进就算了 */
+          }
+        }
+        continue
       }
+      if (!isRefusalText(text) || key === '') continue
+      var real = ''
+      try {
+        real = window.localStorage.getItem(REAL_PREFIX + key) || ''
+      } catch (error) {
+        real = ''
+      }
+      if (real === '' && capturedAnswer !== '') real = capturedAnswer
+      if (real !== '' && real !== text) el.textContent = real
     }
-    if (!hit || current === capturedAnswer) return
-    last.textContent = capturedAnswer
   }
 
   /**
