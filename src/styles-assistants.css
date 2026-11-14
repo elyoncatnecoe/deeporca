@@ -14,13 +14,12 @@
   align-content: start;
 }
 
-/* 总开关卡片贴顶，滚动编辑区时还能顺手关掉助手。 */
+/* 总开关卡片：普通流，**不再 sticky**。
+ * 之前 sticky + 实色背景（rgba .92）+ backdrop-filter，滚动时钉在顶部、把下面的助手卡
+ * 盖住，老 WebView 上还会渲染成一块发白的遮罩 —— 就是用户反馈的「开关一直浮着挡 UI / 冒白底」。
+ * 现在改回普通卡片，不遮挡任何内容。 */
 .asst-switch-card {
-  position: sticky;
-  top: 0;
-  z-index: 1;
   background: rgba(8, 31, 42, 0.92);
-  backdrop-filter: blur(6px);
 }
 
 /* 关掉总开关时整块灰掉、点不动，但配置原样保留。 */
