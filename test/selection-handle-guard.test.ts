@@ -30,36 +30,65 @@ const WEBCHAT = readFileSync(
 )
 const MARKDOWN = readFileSync('src/components/Markdown.tsx', 'utf8')
 
+/**
+ * 去掉注释再断言。
+ *
+ * 这些文件里的注释本身就在讲「只压 TYPE_FLOATING」，直接对原文 assert.match
+ * 会被注释满足 —— 哪怕代码整段被删掉，测试依然绿。踩过一次这种假绿。
+ */
+function codeOnly(source: string): string {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split(/\r?\n/)
+    .map((line) => line.replace(/(^|[^:])\/\/.*$/, '$1'))
+    .join('\n')
+}
+
+const WEBVIEW_CODE = codeOnly(WEBVIEW)
+const SUPPRESSOR_CODE = codeOnly(SUPPRESSOR)
+const WEBCHAT_CODE = codeOnly(WEBCHAT)
+
 test('只压 TYPE_FLOATING，光标/插入手柄不能被一起压掉', () => {
   assert.match(
-    WEBVIEW,
-    /ActionMode\.TYPE_FLOATING/,
+    WEBVIEW_CODE,
+    /type\s*==\s*ActionMode\.TYPE_FLOATING/,
     'DeepSeaWebView.startActionMode 必须只接管 TYPE_FLOATING；全类型都压会让光标拖不动（历史 bug）',
   )
   assert.match(
-    WEBCHAT,
-    /onWindowStartingActionMode[\s\S]*?ActionMode\.TYPE_FLOATING/,
+    WEBCHAT_CODE,
+    /onWindowStartingActionMode\s*\(\s*ActionMode\.Callback\s+\w+\s*,\s*int\s+type\s*\)[\s\S]*?ActionMode\.TYPE_FLOATING/,
     '网页版也要只压 TYPE_FLOATING',
+  )
+  /*
+   * 旧签名 startActionMode(Callback) 等价于 TYPE_PRIMARY。重写它并在里面压掉，
+   * 等于把主模式（插入光标 / 输入框选词）换成一个谎称自己是 TYPE_FLOATING 的
+   * 空 ActionMode —— 光标拖不动、手柄选不了词就是这么回来的。
+   * 不重写时 View 的实现会自动虚调到带 type 的重载，主模式照常交还系统。
+   */
+  assert.doesNotMatch(
+    WEBVIEW_CODE,
+    /startActionMode\s*\(\s*ActionMode\.Callback\s+\w+\s*\)/,
+    'DeepSeaWebView 不许再重写旧签名 startActionMode(Callback)：它默认 TYPE_PRIMARY，压掉会误伤主模式',
   )
 })
 
 test('空 ActionMode 必须遵守契约：给真实 Menu + finish 回调 onDestroy', () => {
   assert.doesNotMatch(
-    SUPPRESSOR,
+    SUPPRESSOR_CODE,
     /getMenu\(\)\s*\{\s*return\s+null/,
     'getMenu() 不能返回 null —— Chromium 会 NPE / 卡死选择会话（历史 bug）',
   )
   assert.match(
-    SUPPRESSOR,
+    SUPPRESSOR_CODE,
     /return\s+menu/,
     'NoOpActionMode.getMenu() 必须返回一个真实的 Menu（PopupMenu(...).getMenu()）',
   )
   assert.match(
-    SUPPRESSOR,
+    SUPPRESSOR_CODE,
     /callback\.onDestroyActionMode\s*\(\s*this\s*\)/,
     'finish() 必须回调 onDestroyActionMode，让 Chromium 正常收尾并保留选区',
   )
-  assert.match(SUPPRESSOR, /setType\s*\(\s*ActionMode\.TYPE_FLOATING\s*\)/, '要声明成 TYPE_FLOATING')
+  assert.match(SUPPRESSOR_CODE, /setType\s*\(\s*ActionMode\.TYPE_FLOATING\s*\)/, '要声明成 TYPE_FLOATING')
 })
 
 test('手柄 PopupWindow 的默认背景必须被钉成透明（否则白底/白闪）', () => {

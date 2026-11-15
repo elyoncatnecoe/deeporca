@@ -60,15 +60,15 @@ public class DeepSeaWebView extends CapacitorWebView {
         return super.startActionMode(callback, type);
     }
 
-    @Override
-    @SuppressWarnings("deprecation")
-    public ActionMode startActionMode(ActionMode.Callback callback) {
-        // 老签名没有 type 参数：只在主界面兜底压掉；网页版窗口交还系统。
-        if (suppressSelectionToolbar && callback != null) {
-            return SelectionMenuSuppressor.noOp(this, callback);
-        }
-        return super.startActionMode(callback);
-    }
+    /*
+     * 故意**不**重写旧签名 {@code startActionMode(Callback)}。
+     *
+     * 在 Android 里它等价于 {@code startActionMode(callback, TYPE_PRIMARY)}：
+     * 不重写时，View 的实现会虚调用到上面那个带 type 的重载，主模式请求照样
+     * 原样交还系统。一旦在这里也无条件压掉，主模式（插入光标/输入框选词那条）
+     * 就会被换成一个 setType(TYPE_FLOATING) 的空 ActionMode —— 正是「光标拖不动、
+     * 手柄选不了词」那个坑的入口，而且源码断言类的测试拦不住这个错位。
+     */
 
     @Override
     public InputConnection onCreateInputConnection(EditorInfo outAttrs) {
