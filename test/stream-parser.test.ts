@@ -128,6 +128,36 @@ test('T-10：最后一个事件没有空行结尾，也必须收进正文和 usa
   }
 })
 
+test('T-10：末帧只跟一个 LF 就断流，正文和 usage 都不能丢', async () => {
+  const stub = stubFetch([sse([
+    'data: {"choices":[{"delta":{"content":"你好"}}]}\n\n',
+    // 只跟一个 \n（没有空行）：这一行已经被解码器吃掉，事件还压在内部，
+    // 旧实现用 pending !== '' 当开关，这里 buffer 是空串 —— 整帧被吞。
+    'data: {"choices":[{"delta":{"content":"，世界"}}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}\n',
+  ])])
+  try {
+    const result = await streamChat({ settings: settingsFor(providerFor()), messages: [USER] })
+    assert.equal(result.content, '你好，世界', '末尾那段正文被吞了')
+    assert.equal(result.usage?.totalTokens, 3, '末尾那个 usage 被吞了')
+  } finally {
+    stub.restore()
+  }
+})
+
+test('T-10：末帧只跟一个 CRLF 就断流，同样不能丢', async () => {
+  const stub = stubFetch([sse([
+    'data: {"choices":[{"delta":{"content":"甲"}}]}\r\n\r\n',
+    'data: {"choices":[{"delta":{"content":"乙"}}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}\r\n',
+  ])])
+  try {
+    const result = await streamChat({ settings: settingsFor(providerFor()), messages: [USER] })
+    assert.equal(result.content, '甲乙')
+    assert.equal(result.usage?.totalTokens, 3)
+  } finally {
+    stub.restore()
+  }
+})
+
 test('T-10：网关忽略 stream 直接回整包 JSON 时，正文要兜回来（以前是空白气泡）', async () => {
   const stub = stubFetch([json({ choices: [{ message: { content: '整包回复' } }] })])
   try {

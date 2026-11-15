@@ -1,6 +1,6 @@
 import { netRequest, netRequestBinary, netStream, NetError } from './net.ts'
 import { dataUrlOf, estimateDataUrlBytes, MAX_IMAGE_BYTES, mediaWithinLimit, parseDataUrl } from './media-store.ts'
-import { SseDecoder } from './sse.ts'
+import { SseDecoder, type SseEvent } from './sse.ts'
 import type { ImageApiConfig, SpeechApiConfig } from './types'
 
 /**
@@ -882,10 +882,14 @@ async function synthesizeSpeechOpenRouter(
    * 全部交给 sse.ts（T-12 以前只补了 CRLF，别的换行仍会漏事件）。
    * 网关不按 SSE 返回时，结束时再按整包 JSON 兜底（见下方）。
    */
-  const consumeText = (textChunk: string): void => {
-    for (const event of sseDecoder.push(textChunk)) {
+  const consumeEvents = (events: SseEvent[]): void => {
+    for (const event of events) {
       if (event.data !== '') consumePayload(event.data)
     }
+  }
+
+  const consumeText = (textChunk: string): void => {
+    consumeEvents(sseDecoder.push(textChunk))
   }
 
   const response = await netStream(
@@ -900,9 +904,10 @@ async function synthesizeSpeechOpenRouter(
     { onChunk: consumeText },
   )
   // 流结束：把最后一段没有空行结尾的 event 处理掉（T-12 的收尾不能丢）。
-  // 注意用 `!== ''` 而不是 trim：CR-only 网关收尾时缓冲区可能只剩一个 \r，
-  // 但那是最后一个事件的终止符，trim 掉就再也派发不出来了。
-  if (sseDecoder.pending !== '') consumeText('\n\n')
+  // 交给 flush() 而不是自己补 '\n\n'：它认得「只剩一个换行」的收尾 —— 那种情况下
+  // buffer 已经空了，事件还压在解码器里，以前用 pending !== '' 当开关会整帧吞掉，
+  // 短回复甚至整条音频都没有。
+  consumeEvents(sseDecoder.flush())
   if (response.status >= 400) throw new MediaApiError(response.status, errorDetailText(response.text))
   // 非 SSE 的兼容路径：有的中转站忽略 stream，直接回完整 JSON。
   if (audioData.length === 0 && response.text.trim().startsWith('{')) {

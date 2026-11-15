@@ -79,6 +79,26 @@ test('flush：没有空行结尾的最后一段也要派发出来（对齐 T-10/
   assert.equal(d.pending, '')
 })
 
+test('flush：末尾只剩一个 LF 时也要派发（行已被吃掉、事件还压在内部）', () => {
+  const d = new SseDecoder()
+  assert.deepEqual(d.push('data: 尾段\n'), [], '缺空行，这一帧还不能派发')
+  assert.equal(d.pending, '', 'buffer 被 push() 吃空了 —— 只看它就会漏掉这一帧')
+  assert.deepEqual(d.flush().map((e) => e.data), ['尾段'])
+  assert.deepEqual(d.flush(), [], 'flush 再调一次必须什么都不做')
+})
+
+test('flush：末尾只剩一个 CRLF 时同样不能漏', () => {
+  const d = new SseDecoder()
+  assert.deepEqual(d.push('data: 甲\r\n'), [])
+  assert.deepEqual(d.flush().map((e) => e.data), ['甲'])
+})
+
+test('flush：末尾是半个 CRLF（只剩 \\r）时也不能漏', () => {
+  const d = new SseDecoder()
+  assert.deepEqual(d.push('data: 乙\r'), [])
+  assert.deepEqual(d.flush().map((e) => e.data), ['乙'])
+})
+
 test('reset：清空缓冲后可复用', () => {
   const d = new SseDecoder()
   d.push('data: 半截')

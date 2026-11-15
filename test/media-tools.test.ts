@@ -245,6 +245,30 @@ test('media API：OpenRouter 语音从 SSE 的 delta.audio.data 收集并拼成 
   }
 })
 
+test('media API：语音流末尾只跟一个 LF 时，最后一段音频不能丢', async () => {
+  const chunk = Buffer.from(Uint8Array.from([0x49, 0x44, 0x33, 0x04, 0x00])).toString('base64')
+  const encoder = new TextEncoder()
+  const restore = stubFetch(async () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        // 只跟一个 \n（没有空行）就 EOF：这一帧是整条流里唯一的一段音频。
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { audio: { data: chunk } } }] })}\n`))
+        controller.close()
+      },
+    })
+    return new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
+  })
+  try {
+    const audio = await synthesizeSpeech(speechConfig(), '你好')
+    assert.ok(
+      audio.dataUrl.length > 'data:audio/mpeg;base64,'.length,
+      '唯一的一段音频被收尾逻辑吞了 —— 用户会听到「语音模型没有返回音频」',
+    )
+  } finally {
+    restore()
+  }
+})
+
 test('Gemini Imagen：走 :predict，解析 bytesBase64Encoded', async () => {
   const calls: Array<{ url: string; body: Record<string, unknown> }> = []
   const restore = stubFetch(async (url, init) => {

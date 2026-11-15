@@ -35,7 +35,13 @@ export class SseDecoder {
   private eventType = ''
   private lastEventId = ''
 
-  /** 还没有构成完整事件、留在缓冲区里的原始文本（供调用方判断收尾）。 */
+  /**
+   * 还没有切出完整行的原始文本（半行）。
+   *
+   * 注意：它**不等于**「还有没派发的事件」。`data: X\n` 这种收尾，行已经被
+   * push() 吃掉了，buffer 为空、事件却还压在 hasData 里 —— 所以收尾判断
+   * 一律用 flush()，别拿这个值当开关（曾经就是这么做，把最后一帧弄丢了）。
+   */
   get pending(): string {
     return this.buffer
   }
@@ -67,9 +73,13 @@ export class SseDecoder {
    * 这是刻意的偏离规范（规范说 EOF 处未完成的事件直接丢弃）：很多网关最后一段
    * 就是不跟空行，丢掉往往正是最后一段正文或 usage —— deepseek.ts 的 T-10 和
    * media-api.ts 的 T-12 都在补这一刀，这里统一成方法，别再各自手写。
+   *
+   * 判据必须同时看两处状态：buffer 里可能是半行没切，也可能已经被 push() 吃完
+   * （`data: X\n` 只跟一个换行就 EOF），事件却还压在 hasData 里没派发。只看
+   * buffer 会把后一种当成「无事可做」直接返回 —— 那就是最后一帧被吞的根因。
    */
   flush(): SseEvent[] {
-    if (this.buffer === '') {
+    if (this.buffer === '' && !this.hasData) {
       return []
     }
     return this.push('\n\n')

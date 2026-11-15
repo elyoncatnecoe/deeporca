@@ -15,7 +15,7 @@ import {
   parseGoogleEvent,
   type ToolDraft,
 } from './protocols'
-import { SseDecoder } from './sse'
+import { SseDecoder, type SseEvent } from './sse'
 
 export class ApiError extends Error {
   readonly status: number
@@ -388,9 +388,14 @@ export async function streamChat(options: {
     }
   }
 
-  /** 把一段原始文本喂给 SSE 解析器；返回 true 表示收到 [DONE]。 */
-  const consume = (chunk: string): boolean => {
-    for (const event of sseDecoder.push(chunk)) {
+  /**
+   * 处理一批已解析事件；返回 true 表示收到 [DONE]。
+   *
+   * 拆成「事件列表 → 结果」这一步，是为了让流中途（push）和收尾（flush）
+   * 走同一段逻辑 —— 以前收尾另外手写一次 consume('\n\n')，两边就漂了。
+   */
+  const consumeEvents = (events: SseEvent[]): boolean => {
+    for (const event of events) {
       if (event.data === '') continue
       // 见到任何一个带 data 的事件（含 [DONE]）就说明网关确实在按 SSE 说话。
       sawPayload = true
@@ -406,6 +411,9 @@ export async function streamChat(options: {
     }
     return false
   }
+
+  /** 把一段原始文本喂给 SSE 解析器；返回 true 表示收到 [DONE]。 */
+  const consume = (chunk: string): boolean => consumeEvents(sseDecoder.push(chunk))
 
   const resetStream = (): void => {
     content = ''
@@ -461,12 +469,15 @@ export async function streamChat(options: {
     /*
      * 收尾 flush（T-10）：最后一个事件经常没有以空行结尾。
      *
-     * 解码器只在空行处分事件，所以只要网关最后一段没跟着 \r\n\r\n，那段就永远留在
-     * pending 里被丢掉 —— 丢的往往正是 usage 或最后一段正文（[DONE] 后面不带空行的
-     * 网关很常见）。media-api.ts 一直有这么一次收尾，这边以前漏了。
+     * 解码器只在空行处分事件，所以只要网关最后一段没跟着空行，那段就永远留在
+     * 解码器里被丢掉 —— 丢的往往正是 usage 或最后一段正文。
+     *
+     * 这里必须交给 flush()：它认得两种收尾，半行没切（buffer 非空），和
+     * `data: {...}\n` 这种只跟一个换行就断流（buffer 已空、事件还在解码器里）。
+     * 以前用 pending !== '' 当开关，后一种被当成「无事可做」，最后一帧直接吞掉。
      */
-    if (!sawErrorStatus && !done && sseDecoder.pending !== '') {
-      if (consume('\n\n')) done = true
+    if (!sawErrorStatus && !done) {
+      if (consumeEvents(sseDecoder.flush())) done = true
     }
     /*
      * 另一半（T-10）：网关忽略 stream:true，直接回整包 JSON。
