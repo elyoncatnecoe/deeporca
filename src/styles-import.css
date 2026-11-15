@@ -104,7 +104,7 @@
 .import-progress {
   height: 8px;
   border-radius: 999px;
-  background: rgba(127, 227, 212, 0.14);
+  background: rgba(var(--line-rgb), 0.14);
   overflow: hidden;
 }
 

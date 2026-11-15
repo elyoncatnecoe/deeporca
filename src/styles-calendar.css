@@ -31,7 +31,7 @@
 }
 
 .calendar-view-toggle .chip.is-active {
-  background: rgba(127, 227, 212, 0.16);
+  background: rgba(var(--line-rgb), 0.16);
 }
 
 /* ---------------------------------------------------------------- 月历本体 */
@@ -95,7 +95,7 @@
 }
 
 .calendar-cell:hover {
-  background: rgba(127, 227, 212, 0.07);
+  background: rgba(var(--line-rgb), 0.07);
   border-color: var(--line);
 }
 
@@ -110,8 +110,8 @@
 }
 
 .calendar-cell.is-selected {
-  border-color: rgba(127, 227, 212, 0.62);
-  background: rgba(127, 227, 212, 0.12);
+  border-color: rgba(var(--line-rgb), 0.62);
+  background: rgba(var(--line-rgb), 0.12);
   color: var(--text);
 }
 
@@ -303,7 +303,7 @@
 
 .calendar-kind-badge.kind-todo {
   color: var(--aqua);
-  border-color: rgba(127, 227, 212, 0.3);
+  border-color: rgba(var(--line-rgb), 0.3);
 }
 
 .calendar-time {
@@ -324,7 +324,7 @@
   font-size: 10px;
   padding: 1px 6px;
   border-radius: 999px;
-  background: rgba(127, 227, 212, 0.08);
+  background: rgba(var(--line-rgb), 0.08);
 }
 
 .calendar-note-actions {

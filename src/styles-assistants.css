@@ -46,9 +46,9 @@
   padding: 11px 12px;
   border: 1px solid var(--line);
   border-radius: 14px;
-  /* C2：原来 rgba(255,255,255,.02) 在深色玻璃底上几乎看不见，卡片层次糊。
+  /* C2：原来 rgba(var(--sheen-rgb),.02) 在深色玻璃底上几乎看不见，卡片层次糊。
      提到 .045 让边界有一点体积感（仍很克制，不抢总开关/激活卡的视觉）。 */
-  background: rgba(255, 255, 255, 0.045);
+  background: rgba(var(--sheen-rgb), 0.045);
 }
 
 .assistant-card[data-active='true'] {
