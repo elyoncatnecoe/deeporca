@@ -94,6 +94,19 @@ jobs:
           SDKMANAGER="${ANDROID_HOME:-/usr/local/lib/android/sdk}/cmdline-tools/latest/bin/sdkmanager"
           yes | "$SDKMANAGER" --licenses > /dev/null
 
+      # android/ 下有两块是 cap sync 生成的：capacitor.build.gradle 里 apply 的
+      # cordova.variables.gradle、以及 RelayScript.java（由 web-relay.ts 生成）。
+      # 不先跑就只会在 Gradle 配置阶段炸「script does not exist」。
+      # 顺序照 scripts/build-android.mjs：先生成中继脚本，再 vite build，再 cap sync。
+      - name: Generate relay script
+        run: node scripts/build-relay-java.mjs
+
+      - name: Build web assets
+        run: pnpm build
+
+      - name: Capacitor sync
+        run: pnpm exec cap sync android
+
       - name: Compile Android Java
         working-directory: android
         run: ./gradlew :app:compileDebugJavaWithJavac --no-daemon --stacktrace
