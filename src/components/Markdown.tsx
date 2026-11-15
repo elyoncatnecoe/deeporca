@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef } from 'react'
 import hljs from 'highlight.js/lib/common'
 import { decodeCode, renderMarkdown } from '../lib/markdown'
+import { writeClipboardText } from '../lib/platform'
 import { useAppStore } from '../lib/store'
 import { useThrottleMarkdownRender } from './useThrottleMarkdownRender'
 
@@ -32,18 +33,11 @@ export function Markdown(props: {
   }, [html])
 
   const copy = async (code: string): Promise<void> => {
-    try {
-      await navigator.clipboard.writeText(code)
-      useAppStore.getState().actions.showToast('已复制')
-    } catch {
-      const area = document.createElement('textarea')
-      area.value = code
-      document.body.appendChild(area)
-      area.select()
-      document.execCommand('copy')
-      area.remove()
-      useAppStore.getState().actions.showToast('已复制')
-    }
+    // 统一走 platform.writeClipboardText：安卓上先走原生 ClipboardManager。
+    // 以前这里失败后会在 body 里临时插入一个 textarea 并 select() —— select() 会抢焦点，
+    // 安卓 WebView 上会「闪一下输入框 / 弹一下键盘」，所以彻底去掉那条兜底。
+    const ok = await writeClipboardText(code)
+    useAppStore.getState().actions.showToast(ok ? '已复制' : '复制失败，可以长按选中再复制')
   }
 
   const onClick = (event: React.MouseEvent<HTMLDivElement>): void => {

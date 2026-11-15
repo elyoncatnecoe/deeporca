@@ -3,9 +3,6 @@ package com.elyoncat.deepsea;
 import android.content.Context;
 import android.util.AttributeSet;
 import android.view.ActionMode;
-import android.view.Menu;
-import android.view.MenuInflater;
-import android.view.View;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 
@@ -14,23 +11,24 @@ import com.getcapacitor.CapacitorWebView;
 /**
  * 自定义 WebView。
  *
- * 一、文本选择工具条：主界面压掉，网页版窗口保留
+ * 一、文本选择工具条
  *
- * WebView 里长按选中文本时，系统会弹一条 FloatingActionMode 工具条（复制/剪切/粘贴/
- * 全选/分享/网页搜索/翻译）。这条工具条是**系统窗口**，配色与布局由系统/ROM 决定，
- * 网页 CSS 管不到，Activity 主题也管不全 —— 实测（2026-11-01，用户真机）：
- *   · 主题已固定为深色（MainActivity 里 setTheme(AppTheme_NoActionBar)）；
- *   · styles.xml 里 colorBackgroundFloating 也钉成了 #0b1b24；
- *   · 结果这条工具条仍然渲染成**一整块白色面板**盖住整个界面，只有「粘贴」按钮可见。
- * 属于该 ROM 上 FloatingActionMode 窗口测量/绘制坏掉，改主题救不回来。
+ * WebView 里长按选中文本时，系统会弹一条 FloatingActionMode 工具条，它是系统窗口，
+ * 配色/测量由 ROM 决定 —— 实测（2026-11-01，用户 vivo V2136A / Android 12 / WebView 91）
+ * 在本机会渲染成整块白色面板盖住界面。所以主界面压掉它，复制/剪切/粘贴/全选/删除
+ * 由网页侧自绘工具条补上（src/components/SelectionCopyBar.tsx）。
  *
- * 所以主界面（capacitor_bridge_layout_main.xml 里的实例）继续把它压掉：重写
- * startActionMode 返回一个空 ActionMode，保留选区与选择手柄、只是不弹系统工具条。
- * 复制/剪切/粘贴/全选由网页侧自绘工具条补上（src/components/SelectionCopyBar.tsx），
- * 粘贴走原生剪贴板插件（DeepSeaClipboardPlugin）。
+ * 关键教训：只压 {@link ActionMode#TYPE_FLOATING}（浮动选择工具条），
+ * **绝不能把插入光标那条一起压**，否则光标无法拖动、手柄无法选词。
+ * 压的方式也必须遵守 ActionMode 契约（真实 Menu + finish 回调），见
+ * {@link SelectionMenuSuppressor}。
  *
- * 网页版窗口（WebChatActivity 里 new 出来的实例）**不压**：那里没有自绘工具条，
- * 压掉就等于没法复制网页内容。它沿用系统工具条。
+ * 两条接缝都接上，互为兜底：
+ *   · 本类重写 {@link #startActionMode}（Chromium 的每条展示路径最终都走这里）；
+ *   · {@code MainActivity.onWindowStartingActionMode} 再兜一层。
+ *
+ * 网页版窗口（WebChatActivity 里 {@code new DeepSeaWebView(this)}）不压，保留系统工具条，
+ * 否则没法复制网页内容。
  *
  * 二、输入法全屏编辑
  *
@@ -39,10 +37,10 @@ import com.getcapacitor.CapacitorWebView;
  */
 public class DeepSeaWebView extends CapacitorWebView {
 
-    /** true = 压掉系统文本选择工具条（主界面）；false = 保留（网页版窗口）。 */
+    /** true = 压掉浮动选择工具条（主界面 XML 实例）；false = 保留（网页版窗口）。 */
     private final boolean suppressSelectionToolbar;
 
-    /** 主界面走 XML 布局，这里压掉系统工具条。 */
+    /** 主界面走 XML 布局，这里压掉浮动选择工具条。 */
     public DeepSeaWebView(Context context, AttributeSet attrs) {
         super(context, attrs);
         this.suppressSelectionToolbar = true;
@@ -54,35 +52,22 @@ public class DeepSeaWebView extends CapacitorWebView {
         this.suppressSelectionToolbar = false;
     }
 
-    /** 空 ActionMode：所有方法都是 no-op，只为让系统认为「ActionMode 已启动」。 */
-    private ActionMode dummyActionMode() {
-        return new ActionMode() {
-            @Override public void setTitle(CharSequence title) {}
-            @Override public void setTitle(int resId) {}
-            @Override public void setSubtitle(CharSequence subtitle) {}
-            @Override public void setSubtitle(int resId) {}
-            @Override public void setCustomView(View view) {}
-            @Override public void invalidate() {}
-            @Override public void finish() {}
-            @Override public Menu getMenu() { return null; }
-            @Override public CharSequence getTitle() { return null; }
-            @Override public CharSequence getSubtitle() { return null; }
-            @Override public View getCustomView() { return null; }
-            @Override public MenuInflater getMenuInflater() { return null; }
-        };
-    }
-
     @Override
     public ActionMode startActionMode(ActionMode.Callback callback, int type) {
-        if (!suppressSelectionToolbar) return super.startActionMode(callback, type);
-        return dummyActionMode();
+        if (suppressSelectionToolbar && type == ActionMode.TYPE_FLOATING && callback != null) {
+            return SelectionMenuSuppressor.noOp(this, callback);
+        }
+        return super.startActionMode(callback, type);
     }
 
     @Override
     @SuppressWarnings("deprecation")
     public ActionMode startActionMode(ActionMode.Callback callback) {
-        if (!suppressSelectionToolbar) return super.startActionMode(callback);
-        return dummyActionMode();
+        // 老签名没有 type 参数：只在主界面兜底压掉；网页版窗口交还系统。
+        if (suppressSelectionToolbar && callback != null) {
+            return SelectionMenuSuppressor.noOp(this, callback);
+        }
+        return super.startActionMode(callback);
     }
 
     @Override

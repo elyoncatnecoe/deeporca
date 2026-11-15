@@ -12,7 +12,7 @@
 
 .quick-cmd-panel {
   position: fixed;
-  z-index: 60;
+  z-index: var(--z-popover);
   display: flex;
   flex-direction: column;
   min-height: 0;

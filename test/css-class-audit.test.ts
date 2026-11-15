@@ -58,8 +58,10 @@ const ALLOWED_WITHOUT_STYLE: Record<string, string> = {
  * CSS 不是以 .css 文件形式存在的源。
  * src/orca/ui/styles.ts 把整张样式表写进字符串、运行时注入 <style>，
  * 所以它的选择器也要算进「已定义」。
+ * src/lib/web-mode.ts 同理：它把「网页版增强样式」拼成字符串注入 chat.deepseek.com，
+ * 里面的 .deepsea-av-head 等选择器不在任何 .css 文件里，但确实是样式规则。
  */
-const EXTRA_CSS_SOURCES = ['src/orca/ui/styles.ts']
+const EXTRA_CSS_SOURCES = ['src/orca/ui/styles.ts', 'src/lib/web-mode.ts']
 
 /* ------------------------------------------------------------------ */
 /* 收集                                                                */

@@ -28,6 +28,16 @@
         -->
         <item name="colorBackgroundFloating">#0b1b24</item>
         <item name="android:colorBackgroundFloating">#0b1b24</item>
+        <!--
+          文本选择手柄的 PopupWindow 底色。
+          Chromium 的 HandleView 用 `new PopupWindow(context, null, android.R.attr.textSelectHandleWindowStyle)`
+          创建手柄窗口；一旦 textSelectHandleWindowStyle 不被某些 ROM / WebView 版本采纳，
+          PopupWindow 就退回主题默认的 popupBackground —— AppCompat 那是一张浅色 9-patch，
+          于是手柄周围出现「白色方块」并伴随选择时的一下白闪。
+          这里把主题默认 popupBackground 直接钉成透明，作为兜底（手柄窗口、自动填充、上下文菜单都被覆盖，
+          本 App 这几个系统弹层要么已关闭要么已自绘，不受影响）。
+        -->
+        <item name="android:popupBackground">@drawable/ds_transparent</item>
         <item name="android:textColorPrimary">#e6f2f6</item>
         <item name="android:textColorSecondary">#9fc0cc</item>
         <!--
@@ -64,7 +74,7 @@
         <item name="android:windowIsTranslucent">true</item>
         <item name="android:backgroundDimEnabled">false</item>
         <item name="android:colorBackground">@android:color/transparent</item>
-        <item name="android:popupBackground">@android:color/transparent</item>
+        <item name="android:popupBackground">@drawable/ds_transparent</item>
     </style>
 
     <style name="AppTheme.NoActionBar" parent="Theme.AppCompat.NoActionBar">
@@ -77,6 +87,8 @@
         <!-- 同 AppTheme：把系统弹层钉成深色，避免长按时出现白色面板。 -->
         <item name="colorBackgroundFloating">#0b1b24</item>
         <item name="android:colorBackgroundFloating">#0b1b24</item>
+        <!-- 同 AppTheme：兜底把手柄 PopupWindow 的默认背景钉成透明，消除「白底 / 白闪」。 -->
+        <item name="android:popupBackground">@drawable/ds_transparent</item>
         <item name="android:textColorPrimary">#e6f2f6</item>
         <item name="android:textColorSecondary">#9fc0cc</item>
         <!-- 同 AppTheme：光标 / 选中高亮 / 选择手柄的品牌色重绘（主界面用的是这个主题）。 -->

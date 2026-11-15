@@ -273,7 +273,7 @@
      宿主是 fixed + inset:0 且没有 transform/filter，clientX/clientY 可直接用。 */
   .orca-context-menu {
     position: fixed;
-    z-index: 2147483647;
+    z-index: var(--z-pet);
     display: none;
     min-width: 208px;
     padding: 5px;

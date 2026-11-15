@@ -122,9 +122,18 @@ test('查看器：翻页 / 保存 / 分享 / 删除 / 保存中 / toast 都在',
 
 test('查看器压在相册弹窗之上、toast 之下', () => {
   const viewer = STYLES.slice(STYLES.indexOf('.photo-viewer {'))
-  const z = /z-index:\s*(\d+)/.exec(viewer)
+  // A3 之后浮层 z-index 走 var(--z-*)，这里既支持裸数字也支持变量（从 :root 解析真实值）。
+  const z = /z-index:\s*(?:var\(--z-([a-z0-9-]+)\)|(\d+))/.exec(viewer)
   assert.ok(z !== null, '.photo-viewer 没写 z-index')
-  const value = Number(z?.[1])
+  let value: number
+  if (z[2] !== undefined) {
+    value = Number(z[2])
+  } else {
+    const name = z[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const def = new RegExp('--z-' + name + '\\s*:\\s*(-?\\d+)').exec(STYLES)
+    assert.ok(def !== null, `--z-${z[1]} 没有在 :root 定义`)
+    value = Number(def[1])
+  }
   assert.ok(value > 100, '必须高于 .modal-backdrop(100)，否则从相册点开会被盖住')
   assert.ok(value < 200, '必须低于 .toast(200)，否则「已保存到相册」那条结果看不见')
 })
