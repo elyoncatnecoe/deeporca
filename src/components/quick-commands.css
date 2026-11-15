@@ -12,7 +12,7 @@
 
 .quick-cmd-panel {
   position: fixed;
-  z-index: 60;
+  z-index: var(--z-popover);
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -26,6 +26,21 @@
   -webkit-backdrop-filter: blur(22px);
   backdrop-filter: blur(22px);
   overflow: hidden;
+}
+
+/* 老内核 / 触屏：大面模糊会不绘制（黑屏）或发白、且滚动持续重绘很卡 —— 一律降级实色。 */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .quick-cmd-panel {
+    background: rgba(6, 24, 32, 0.98);
+  }
+}
+
+@media (pointer: coarse) {
+  .quick-cmd-panel {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background: rgba(6, 24, 32, 0.98);
+  }
 }
 
 /* 首帧还在量位置：先占位但不可见，避免在 (0,0) 闪一下。 */

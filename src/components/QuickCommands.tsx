@@ -49,10 +49,16 @@ const ACT_COMMANDS = [
   '玩耍',
 ] as const
 
-/** 常用指令：label 给人扫一眼，text 是真正填进输入框的句子（明着写出来，不搞暗箱）。 */
+/**
+ * 常用指令：label 给人扫一眼，text 是真正填进输入框的句子（明着写出来，不搞暗箱）。
+ *
+ * label 里用泛称「助手」而不是某个具体名字：这几条是通用工具指令，换哪个助手都成立，
+ * 写死名字反而在换了助手之后读着别扭（也没必要为此做名字判定）。
+ * 注意与上面的「虎鲸动作」区分：那一组是**身体动画**，只有虎鲸本体有，所以固定叫虎鲸。
+ */
 const TOOL_COMMANDS: ReadonlyArray<{ label: string; text: string }> = [
-  { label: '让虎鲸写网页', text: '帮我写一个能直接玩的小网页游戏，先问我想玩什么。' },
-  { label: '让虎鲸记住当前记忆', text: '记住：' },
+  { label: '让助手写网页', text: '帮我写一个能直接玩的小网页游戏，先问我想玩什么。' },
+  { label: '让助手记住当前记忆', text: '记住：' },
   { label: '总结这段对话', text: '把上面这段对话总结成几条要点。' },
   { label: '解释刚才那段代码', text: '解释一下刚才那段代码在做什么。' },
   { label: '拆成待办清单', text: '把这件事拆成可以照着做的待办清单。' },
@@ -236,6 +242,7 @@ export function QuickCommands(props: {
           <div id={menuId} className="quick-cmd-menu" role="menu" aria-label="快捷指令" onKeyDown={onMenuKeyDown}>
             <div className="quick-cmd-group" role="group" aria-label="虎鲸动作">
               <p className="quick-cmd-group-title">
+                {/* 固定叫「虎鲸动作」：这一组是身体动画，只有虎鲸本体有，与当前助手名无关。 */}
                 <span>虎鲸动作</span>
                 <small>本地执行 · 不花 token</small>
               </p>

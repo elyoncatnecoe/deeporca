@@ -1,6 +1,7 @@
 package com.elyoncat.deepsea;
 
 import android.os.Bundle;
+import android.view.ActionMode;
 import android.view.View;
 import android.webkit.WebView;
 
@@ -73,6 +74,30 @@ public class MainActivity extends BridgeActivity {
         disableWebViewAutofill();
         View content = findViewById(android.R.id.content);
         if (content != null) content.postDelayed(this::disableWebViewAutofill, 800);
+    }
+
+    /**
+     * 只压掉「浮动的文本选择工具条」，保留选区/选择手柄/光标拖动。
+     *
+     * 为什么在这个 Activity 的窗口回调里接：Chromium 展示浮动选择工具条有多条路径
+     * （长按、拖手柄调整选区 ADJUST_SELECTION、窗口重新获得焦点时 restoreSelectionPopups、
+     * TextClassifier 异步回调），网页层的 contextmenu preventDefault 拦不全；而
+     * {@code onWindowStartingActionMode} 是唯一稳定的接缝。这里只接管
+     * {@link ActionMode#TYPE_FLOATING}，其它类型（含插入光标）原样交还系统 ——
+     * 这正是之前「重写 WebView.startActionMode 全压」导致光标不能拖的根因，现已改掉。
+     *
+     * 网页版窗口是另一个 Activity（WebChatActivity），不走这里，继续用系统工具条。
+     * 详见 {@link SelectionMenuSuppressor}。
+     */
+    @Override
+    public ActionMode onWindowStartingActionMode(ActionMode.Callback callback, int type) {
+        if (type == ActionMode.TYPE_FLOATING && callback != null && getWindow() != null) {
+            View anchor = getWindow().getDecorView();
+            if (anchor != null) {
+                return SelectionMenuSuppressor.noOp(anchor, callback);
+            }
+        }
+        return super.onWindowStartingActionMode(callback, type);
     }
 
     /**

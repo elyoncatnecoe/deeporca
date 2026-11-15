@@ -502,7 +502,19 @@ export interface Settings {
   autoTitle: boolean
   /** 网页模式是否注入头像。 */
   webAvatar: boolean
-  /** 网页模式是否显示纸雕（App 内已不再显示纸雕，只剩网页版这一处）。 */
+  /**
+   * 「纸雕虎鲸」开关，同时是**网页账号功能的总闸**（默认关闭）。
+   *
+   * 关着：网页窗里不注入纸雕；前端对话的模型列表里不出现 `deepseek-chat-web`；
+   * 设置里也不给「添加网页账号供应商」的入口。
+   * 打开：纸雕、网页账号模型、相关功能一次性全回来。
+   *
+   * 网页账号借的是 chat.deepseek.com 的登录态，复杂网络环境下容易被判成异常客户端，
+   * 所以默认不暴露 —— 见 `src/lib/web-gate.ts`。
+   *
+   * 注意：这里只改**新装**的默认值。老数据里已经存了 `true` 的保持原样
+   * （`settings.ts` 的 `!== false` 规范化就是为这个保留的）。
+   */
   webPet: boolean
   /**
    * 纸雕助手（网页版）的默认提示词。
@@ -727,7 +739,8 @@ export const DEFAULT_SETTINGS: Settings = {
   sound: false,
   autoTitle: true,
   webAvatar: true,
-  webPet: true,
+  // 纸雕虎鲸默认关闭，同时关掉网页账号模型（见 webPet 的注释）。
+  webPet: false,
   webPetPrompt: DEFAULT_WEB_PET_PROMPT,
   assistants: defaultAssistants(),
   assistantId: DEFAULT_ASSISTANT_ID,

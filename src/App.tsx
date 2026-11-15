@@ -5,6 +5,7 @@ import { startReminderPolling } from './lib/reminders'
 import { useAppStore } from './lib/store'
 import { Chat } from './components/Chat'
 import { HistoryDrawer } from './components/HistoryDrawer'
+import { NewChatSheet } from './components/NewChatSheet'
 import { Home } from './components/Home'
 import { MemoryScreen } from './components/Memory'
 import { Onboarding } from './components/Onboarding'
@@ -30,6 +31,7 @@ export default function App() {
   const bootError = useAppStore((state) => state.bootError)
   const screen = useAppStore((state) => state.screen)
   const historyOpen = useAppStore((state) => state.historyOpen)
+  const newChatOpen = useAppStore((state) => state.newChatOpen)
   const appTone = useAppStore((state) => state.settings.appTone)
   const customAccent = useAppStore((state) => state.settings.customAccent)
   const customBubble = useAppStore((state) => state.settings.customBubble)
@@ -105,6 +107,11 @@ export default function App() {
         {screen === 'onboarding' && <Onboarding />}
       </div>
       {historyOpen && <HistoryDrawer />}
+      {/* 新建对话弹层挂在 App 层：Chat 顶部和历史抽屉的「+」共用同一个（UI 反馈 #2）。 */}
+      <NewChatSheet
+        open={newChatOpen}
+        onClose={() => useAppStore.getState().actions.setNewChatOpen(false)}
+      />
       <ApprovalGate />
       <Toast />
       {/*

@@ -21,6 +21,7 @@ import {
 import { loadSettings, persistSettings } from './settings'
 import { findAssistant, resolveAssistantConfig } from './assistant'
 import { mirrorProviderFields, patchProvider, syncProviderToSettings } from './providers'
+import { applyWebGate, webGateNotice } from './web-gate'
 import { reconcileServers, setPolicyWriter } from './mcp-registry'
 import { memoryCount } from './memory'
 import { syncWebChatContext } from './web-context'
@@ -99,6 +100,14 @@ interface AppState {
   previewVersion: number
   historyOpen: boolean
   /**
+   * 新建对话弹层（单聊 / 群聊）。
+   *
+   * 和 historyOpen 一样是纯瞬时 UI 状态，不落库。放到 store 而不是 Chat 本地，
+   * 是因为历史抽屉和历史页里的「+」也要能打开同一个弹层 —— 之前那两个入口
+   * 直接 createConversation()，绕过了单聊/群聊选择（UI 反馈 #2）。
+   */
+  newChatOpen: boolean
+  /**
    * 欣赏模式：藏起所有菜单，只看海。
    *
    * 纯瞬时 UI 状态，和 historyOpen 一样不落库 —— 下次启动该是正常的界面，
@@ -114,6 +123,8 @@ interface AppState {
     setScreen: (screen: Screen) => void
     setSheet: (sheet: SheetSize) => void
     setHistoryOpen: (open: boolean) => void
+    /** 打开 / 关闭「新建对话」弹层（单聊 / 群聊）。 */
+    setNewChatOpen: (open: boolean) => void
     /** 进出欣赏模式（只影响界面，不落库）。 */
     setZen: (on: boolean) => void
     setDraft: (draft: string) => void
@@ -231,6 +242,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   workspaceFiles: [],
   previewVersion: 0,
   historyOpen: false,
+  newChatOpen: false,
   zen: false,
   draft: '',
   actions: {
@@ -244,6 +256,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       } catch (error) {
         bootError = `读取设置失败：${describeError(error)}`
       }
+      /*
+       * 启动不走 setSettings（boot 直接 set 状态），所以闸门必须在这里也过一遍。
+       * 否则「上次关掉了纸雕虎鲸、但库里还存着网页账号」的设备，一开机又回到网页模式。
+       */
+      settings = applyWebGate(settings).settings
 
       let conversations: Conversation[] = []
       let memories: MemoryEntry[] = []
@@ -331,6 +348,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     setHistoryOpen(historyOpen) {
       set({ historyOpen })
     },
+    setNewChatOpen(newChatOpen) {
+      set({ newChatOpen })
+    },
 
     setZen(zen) {
       set({ zen })
@@ -355,12 +375,29 @@ export const useAppStore = create<AppState>((set, get) => ({
       } else if (patch.providers !== undefined) {
         next = mirrorProviderFields(next)
       }
+      /*
+       * 网页账号总闸（纸雕虎鲸）。关着时必须真正退出网页账号：只把模型换成 API 模型
+       * 是不够的 —— `isWebChatProvider` 是「模型是网页模型 **或** 供应商协议是
+       * deepseek-web」，只换模型会留下「界面显示 deepseek-flash、实际仍走网页账号」。
+       * 见 lib/web-gate.ts 的 applyWebGate。
+       */
+      const gated = applyWebGate(next)
+      next = gated.settings
       set({ settings: next })
       await persistSettings(next)
+      // 切走这件事必须让用户看见：否则「模型/供应商自己变了」比「网页账号没了」更难解释。
+      const gateNotice = webGateNotice(gated)
+      if (gateNotice !== null) get().actions.setNotice(gateNotice)
       if (patch.aquariumTheme !== undefined) stageBridge.current?.setTheme(next.aquariumTheme)
       // 助手设定 / 记忆相关变了，就把人设与记忆重新推给网页窗，
       // 否则网页账号那边还在用旧人设说话。
-      if (patch.assistants !== undefined || patch.assistantId !== undefined || patch.memoryTokenBudget !== undefined) {
+      // assistantsEnabled 也要算进来：关掉助手时推一份空的，网页窗才会真的停用旧人设。
+      if (
+        patch.assistants !== undefined
+        || patch.assistantId !== undefined
+        || patch.memoryTokenBudget !== undefined
+        || patch.assistantsEnabled !== undefined
+      ) {
         void syncWebChatContext(next, get().memories).catch(() => undefined)
       }
       // MCP 配置变了就按新配置对齐连接（新增的连上、删掉的断开）。

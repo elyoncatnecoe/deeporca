@@ -190,6 +190,27 @@ public final class WebApiClient {
         saveThreads();
     }
 
+    /**
+     * 把所有线程「这一版人设已经拼过」的标记清掉（并落盘）。
+     *
+     * 助手被关掉时调用：那一刻上层推下来的是空人设，不注入是对的，但缓存必须一起清。
+     * 否则用户再打开同一个助手、人设一个字都没变，去重会认为「A 已经拼过」而永远跳过，
+     * 网页那边就一直用关掉之前的旧设定说话。
+     *
+     * 只动 persona 字段：sid / mid / 历史消息一律保留 —— 清标记不等于撤回旧消息，
+     * 已经发进网页会话里的设定本来就撤不回来。
+     * 与 Electron 侧 electron/deepseek-api.ts 的 clearPersonaCache() 逐条对应。
+     */
+    static void clearPersonaCache() {
+        boolean changed = false;
+        for (WebThread thread : THREADS.values()) {
+            if (thread.persona == null || thread.persona.isEmpty()) continue;
+            thread.persona = "";
+            changed = true;
+        }
+        if (changed) saveThreads();
+    }
+
     /* ---------------- 发消息 ---------------- */
 
     /** 一次回复：正文加思考过程。 */
@@ -241,10 +262,23 @@ public final class WebApiClient {
         // 否则这里就退化成「每条消息都重拼一遍人设」。
         String persona = systemPrompt == null ? "" : systemPrompt.trim();
         boolean needPersona = !persona.isEmpty() && !persona.equals(thread.persona);
+        /*
+         * 空人设（助手被关掉）：这一轮不注入，但**立刻**把去重标记清掉并落盘。
+         *
+         * 不清的话，「开 A → 关 → 再开 A」第三步会被判成「A 已经拼过」而永久跳过，
+         * 网页那边就一直用关掉之前的旧设定。只清标记：sid / mid / 历史消息都不动，
+         * 已经发进网页会话里的旧设定本来就撤不回来。
+         * 与 Electron 侧 electron/deepseek-api.ts 的同一段逐条对应。
+         */
+        if (persona.isEmpty() && !thread.persona.isEmpty()) {
+            thread.persona = "";
+            saveThreads();
+        }
         String fullPrompt = needPersona ? (persona + "\n\n---\n\n" + prompt) : prompt;
 
         StringBuilder text = new StringBuilder();
         StringBuilder reasoning = new StringBuilder();
+        StringBuilder template = new StringBuilder();
 
         String endpoint = COMPLETION;
         JSONObject body = new JSONObject();
@@ -280,6 +314,7 @@ public final class WebApiClient {
             // 续写是「接着写」，正文要累加，不能整段覆盖。
             text.append(result.text);
             reasoning.append(result.reasoning);
+            template.append(result.template);
 
             if ("INCOMPLETE".equals(result.status) && result.messageId != null && continues < MAX_CONTINUES) {
                 continues++;
@@ -305,7 +340,8 @@ public final class WebApiClient {
         }
 
         Reply reply = new Reply();
-        reply.text = text.toString();
+        // 有真实正文就优先用它；只有确实没有正文（纯拒绝/模板）时才回落到模板文案。
+        reply.text = text.length() > 0 ? text.toString() : template.toString();
         reply.reasoning = reasoning.toString();
         return reply;
     }
@@ -472,6 +508,8 @@ public final class WebApiClient {
     private static final class StreamResult {
         String text = "";
         String reasoning = "";
+        /** 模板/拒绝文案（TEMPLATE_RESPONSE）单独收，真实正文存在时不用它。 */
+        String template = "";
         String status;
         Long messageId;
         final java.util.Map<Integer, String> kinds = new java.util.HashMap<>();
@@ -666,7 +704,11 @@ public final class WebApiClient {
 
     private static void appendTo(StreamResult result, String kind, String content) {
         if (content == null || content.isEmpty()) return;
-        if (isThinkingKind(kind)) result.reasoning += content; else result.text += content;
+        if (isThinkingKind(kind)) { result.reasoning += content; return; }
+        // 模板/拒绝文案单独存：真实正文存在时不要把它拼进回答，否则「安全拦截」
+        // 会把真正的内容替换/混进一段抱歉模板里。
+        if (kind != null && "TEMPLATE_RESPONSE".equalsIgnoreCase(kind)) { result.template += content; return; }
+        result.text += content;
     }
 
     private static boolean isThinkingKind(String kind) {

@@ -1,5 +1,5 @@
 import { nanoid } from 'nanoid'
-import { addUsage, listMessageSiblings, putMedia, putMessage, rewriteMessageAndTruncate } from './db'
+import { addUsage, deleteMediaByMessage, listMessageSiblings, putMedia, putMessage, rewriteMessageAndTruncate } from './db'
 import { ApiError, streamChat, type StreamResult } from './deepseek'
 import { isTruncatedFinish, resolveOutputCap, retryCap } from './budget'
 import {
@@ -12,7 +12,8 @@ import {
   remember,
 } from './memory'
 import { conversationDigest, maybeCompress } from './compress'
-import { applyMessageTemplate, conversationConfig, findAssistant, resolveAssistantConfig } from './assistant'
+import { applyMessageTemplate, conversationConfig, effectiveSettings, findAssistant, resolveAssistantConfig } from './assistant'
+import { isWebChatModel } from './models'
 import { buildRequestMessages, buildRequestMessagesDetailed, buildSystemPrompt, estimateTokens } from './prompt'
 import { bodyMind, extractBodyDirectives, type BodyDirective } from './body'
 import { parseCommand } from './commands'
@@ -30,8 +31,11 @@ import { planGroupRound } from './group-chat'
 import { calendarToolDefinitions, isCalendarToolName, runCalendarTool } from './calendar-tools'
 import { mediaRefOf } from './media-store'
 import { currentProvider, isWebChatProvider } from './providers'
+import { applyWebGate } from './web-gate'
 import { webChatReady, loginWebChat, setWebChatContext } from './web-chat'
 import { buildWebChatContext } from './web-context'
+import { createTurnGate, type Turn } from './turn-gate'
+import { runSend } from './send-orchestrator'
 
 /**
  * 一次发言允许的工具循环轮数。
@@ -42,8 +46,8 @@ import { buildWebChatContext } from './web-context'
  */
 const MAX_TOOL_ITERATIONS = 10
 
-let activeAbort: AbortController | null = null
-let busy = false
+/** 一轮发送的占位/释放都走这个门；抽到 src/lib/turn-gate.ts 是为了能写行为测试。 */
+const turnGate = createTurnGate()
 /**
  * 本轮回复要落进哪个消息节点。null = 新消息（各自成节点）。
  * 重新生成时设为被重新生成那条的 nodeId，于是新回复成为同节点的另一个候选。
@@ -51,29 +55,49 @@ let busy = false
 let turnNodeId: string | null = null
 
 /**
+ * 一轮「发送」的独占句柄。
+ *
+ * 以前 busy / activeAbort / turnNodeId 是三个散着的全局变量，谁都能改，于是有三个洞：
+ *   1. 检查 busy 和置位 busy 之间夹着 runLocalCommand / webChatReady / loginWebChat
+ *      这些真实 await —— 连点两下发送能开出两轮；
+ *   2. 两轮各自 new AbortController() 覆盖 activeAbort，先启动那轮失去 abort 句柄；
+ *   3. 所有 finally 无条件清空全局状态，旧轮收尾会把新轮的 controller 清成 null，
+ *      使新轮再也停不下来（BUG-REVIEW T-08）。
+ *
+ * 现在每轮先 beginTurn() 占位拿到自己的句柄，收尾用 endTurn() 只复位「自己还是当前轮」
+ * 的那一份。五个入口（sendMessage / sendGroupMessage / continueTurn / regenerate /
+ * editAndResend）必须成对使用，漏一个就会出现「旧任务清掉新任务状态」。
+ */
+/** 占住「正在发送」并建立这一轮的 controller。返回 null 表示已经有一轮在跑。 */
+function beginTurn(): Turn | null {
+  return turnGate.begin()
+}
+
+/** 只在这一轮仍然是当前轮时复位。旧轮晚到的 finally 不许动新轮的状态。 */
+function endTurn(turn: Turn): void {
+  if (turnGate.end(turn)) turnNodeId = null
+}
+
+/**
  * 一次性放掉「正在发送」的全部状态。正常流程走 sendMessage/regenerate 的 finally，
  * 这里给漏网的兜底：只要用户还能按到「停止」，就不该需要重启进程才能再发消息。
  */
 function resetSendingState(): void {
   turnNodeId = null
-  activeAbort = null
-  busy = false
+  turnGate.reset()
   const actions = useAppStore.getState().actions
   actions.setSending(false)
   actions.endLive()
 }
 
 export function stopSending(): void {
-  if (activeAbort !== null) {
-    activeAbort.abort()
-    return
-  }
+  if (turnGate.abortCurrent()) return
   // 还挂着 sending 却没有在跑的请求：说明上一次收尾漏了（BUG-REVIEW P0-2）。
-  if (busy) resetSendingState()
+  if (turnGate.isBusy()) resetSendingState()
 }
 
 export function isSending(): boolean {
-  return busy
+  return turnGate.isBusy()
 }
 
 function errorText(error: unknown): string {
@@ -90,7 +114,11 @@ function errorText(error: unknown): string {
  * 于是它仍然认为那是自己的行为，却不需要为一次转圈多跑一轮请求。
  * @returns true 表示这一轮已经被本地处理掉，调用方不必再走模型。
  */
-async function runLocalCommand(text: string, attachments: readonly Attachment[]): Promise<boolean> {
+async function runLocalCommand(
+  text: string,
+  attachments: readonly Attachment[],
+  signal: AbortSignal,
+): Promise<boolean> {
   if (attachments.length > 0) return false
   const command = parseCommand(text)
   if (command === null) return false
@@ -98,49 +126,56 @@ async function runLocalCommand(text: string, attachments: readonly Attachment[])
   const store = useAppStore.getState()
   if (!store.settings.embodiment) return false
 
-  busy = true
-  try {
-    let conversationId = store.activeId
-    if (conversationId === null) conversationId = await store.actions.createConversation()
+  /*
+   * busy / activeAbort 由调用方（sendMessage 里的 beginTurn）统一持有。
+   *
+   * 以前这里自己 `busy = true` … finally `busy = false`，会把调用方刚占住的那一份
+   * 提前放掉：本地动作还在演，用户就能再发一条，两轮叠在一起（BUG-REVIEW T-09）。
+   * 取消改走 signal —— 停止之后不要再演动作，也不要补那条预制回复。
+   */
+  let conversationId = store.activeId
+  if (conversationId === null) conversationId = await store.actions.createConversation()
 
-    const userMessage: ChatMessage = {
-      id: `msg_${nanoid(10)}`,
-      conversationId,
-      role: 'user',
-      content: text.trim(),
-      createdAt: Date.now(),
-      status: 'done',
-    }
-    await store.actions.appendMessage(userMessage)
-
-    const conversation = useAppStore.getState().conversations.find((item) => item.id === conversationId)
-    if (conversation !== undefined && conversation.title === '新的对话') {
-      await store.actions.bumpConversation({ title: text.trim().replace(/\s+/g, ' ').slice(0, 26) }, conversationId)
-    }
-
-    // 身体先动，再说那句预制的话；两件事都不依赖网络。
-    const directive: BodyDirective = {
-      act: command.act,
-      ...(command.mood !== undefined ? { mood: command.mood } : {}),
-    }
-    stageBridge.current?.perform?.(directive)
-    bodyMind.perform(directive)
-    bodyMind.speak(command.reply, 'say', 4200)
-    stageBridge.current?.pulse('reply')
-
-    const reply: ChatMessage = {
-      id: `msg_${nanoid(10)}`,
-      conversationId,
-      role: 'assistant',
-      content: command.reply,
-      createdAt: Date.now(),
-      status: 'done',
-    }
-    await store.actions.appendMessage(reply)
-    return true
-  } finally {
-    busy = false
+  const userMessage: ChatMessage = {
+    id: `msg_${nanoid(10)}`,
+    conversationId,
+    role: 'user',
+    content: text.trim(),
+    createdAt: Date.now(),
+    status: 'done',
   }
+  await store.actions.appendMessage(userMessage)
+
+  const conversation = useAppStore.getState().conversations.find((item) => item.id === conversationId)
+  if (conversation !== undefined && conversation.title === '新的对话') {
+    await store.actions.bumpConversation({ title: text.trim().replace(/\s+/g, ' ').slice(0, 26) }, conversationId)
+  }
+
+  // 用户消息已经落库，从这一刻起用户随时可能按停止。
+  if (signal.aborted) return true
+
+  // 身体先动，再说那句预制的话；两件事都不依赖网络。
+  const directive: BodyDirective = {
+    act: command.act,
+    ...(command.mood !== undefined ? { mood: command.mood } : {}),
+  }
+  stageBridge.current?.perform?.(directive)
+  bodyMind.perform(directive)
+  bodyMind.speak(command.reply, 'say', 4200)
+  stageBridge.current?.pulse('reply')
+
+  const reply: ChatMessage = {
+    id: `msg_${nanoid(10)}`,
+    conversationId,
+    role: 'assistant',
+    content: command.reply,
+    createdAt: Date.now(),
+    status: 'done',
+  }
+  // 演动作这段时间里也可能被停掉：那就只留用户那条，不补回复。
+  if (signal.aborted) return true
+  await store.actions.appendMessage(reply)
+  return true
 }
 
 /**
@@ -151,47 +186,50 @@ async function runLocalCommand(text: string, attachments: readonly Attachment[])
  * 绝不弹设置页——用户只是想说句话，不是想改配置。
  * @returns true 表示这一轮已经被本地处理掉。
  */
-async function runOfflineReply(text: string, attachments: readonly Attachment[]): Promise<boolean> {
+async function runOfflineReply(
+  text: string,
+  attachments: readonly Attachment[],
+  signal: AbortSignal,
+): Promise<boolean> {
   const store = useAppStore.getState()
-  busy = true
-  try {
-    let conversationId = store.activeId
-    if (conversationId === null) conversationId = await store.actions.createConversation()
+  // busy / activeAbort 同样由调用方的 beginTurn 持有（见 runLocalCommand 的注释）。
+  let conversationId = store.activeId
+  if (conversationId === null) conversationId = await store.actions.createConversation()
 
-    const userMessage: ChatMessage = {
-      id: `msg_${nanoid(10)}`,
-      conversationId,
-      role: 'user',
-      content: text.trim(),
-      attachments: attachments.length > 0 ? [...attachments] : undefined,
-      createdAt: Date.now(),
-      status: 'done',
-    }
-    await store.actions.appendMessage(userMessage)
-
-    const conversation = useAppStore.getState().conversations.find((item) => item.id === conversationId)
-    if (conversation !== undefined && conversation.title === '新的对话') {
-      const source = text.trim() !== '' ? text.trim() : attachments[0]?.name ?? '新的对话'
-      await store.actions.bumpConversation({ title: source.replace(/\s+/g, ' ').slice(0, 26) }, conversationId)
-    }
-
-    const reply: ChatMessage = {
-      id: `msg_${nanoid(10)}`,
-      conversationId,
-      role: 'assistant',
-      content: offlineLine(),
-      createdAt: Date.now(),
-      status: 'done',
-    }
-    await store.actions.appendMessage(reply)
-    bodyMind.speak(reply.content, 'say', 4200)
-    stageBridge.current?.pulse('reply')
-    // 提示是可点的，想填 Key 的人点一下就去；不想填的人可以继续在这儿待着。
-    store.actions.setNotice('还没接上模型，我现在只能这样简单回你。点这里填 API Key。')
-    return true
-  } finally {
-    busy = false
+  const userMessage: ChatMessage = {
+    id: `msg_${nanoid(10)}`,
+    conversationId,
+    role: 'user',
+    content: text.trim(),
+    attachments: attachments.length > 0 ? [...attachments] : undefined,
+    createdAt: Date.now(),
+    status: 'done',
   }
+  await store.actions.appendMessage(userMessage)
+
+  const conversation = useAppStore.getState().conversations.find((item) => item.id === conversationId)
+  if (conversation !== undefined && conversation.title === '新的对话') {
+    const source = text.trim() !== '' ? text.trim() : attachments[0]?.name ?? '新的对话'
+    await store.actions.bumpConversation({ title: source.replace(/\s+/g, ' ').slice(0, 26) }, conversationId)
+  }
+
+  // 用户消息已落库；停止之后不要再补那句本地回复，也不要再弹「去填 Key」的提示。
+  if (signal.aborted) return true
+
+  const reply: ChatMessage = {
+    id: `msg_${nanoid(10)}`,
+    conversationId,
+    role: 'assistant',
+    content: offlineLine(),
+    createdAt: Date.now(),
+    status: 'done',
+  }
+  await store.actions.appendMessage(reply)
+  bodyMind.speak(reply.content, 'say', 4200)
+  stageBridge.current?.pulse('reply')
+  // 提示是可点的，想填 Key 的人点一下就去；不想填的人可以继续在这儿待着。
+  store.actions.setNotice('还没接上模型，我现在只能这样简单回你。点这里填 API Key。')
+  return true
 }
 
 /** 没接 Key 时的预制回应，随机且不重复上一条。 */
@@ -219,55 +257,88 @@ function offlineLine(): string {
  * body-control directives, and fold the result into memory.
  * @returns true once the user message was accepted (the composer may clear).
  */
-export async function sendMessage(text: string, attachments: Attachment[] = []): Promise<boolean> {
+export async function sendMessage(
+  text: string,
+  attachments: Attachment[] = [],
+  options: { onAccepted?: () => void } = {},
+): Promise<boolean> {
   const trimmed = text.trim()
-  if ((trimmed === '' && attachments.length === 0) || busy) return false
+  if (trimmed === '' && attachments.length === 0) return false
   if (attachments.length > MAX_ATTACHMENTS) {
     useAppStore.getState().actions.showToast(`一次最多附上 ${MAX_ATTACHMENTS} 个文件`)
     return false
   }
   const store = useAppStore.getState()
-  const settings = store.settings
+  /*
+   * 路由判断用「这段对话实际生效的设置」，不是全局 settings。
+   *
+   * 助手可以覆盖模型、对话也有快照。全局与生效值不一致时，以前两套判断会打架：
+   * 全局是网页账号、快照是 API 模型 → 进了登录流程但请求按 API 发 → 「还没有填 API Key」/401；
+   * 全局是 API、快照是网页模型 → 直接走离线回复 → 「还没接上模型，点这里填 API Key」。
+   * runAssistantTurn 用的是 cfg.model，这里也用同一份。
+   */
+  const effective = effectiveSettings(
+    store.settings,
+    store.conversations.find((item) => item.id === store.activeId),
+  )
 
-  // 「转个圈」「吐泡泡」这类是给虎鲸的动作口令，本地做完就结束。
-  if (await runLocalCommand(trimmed, attachments)) return true
+  /*
+   * 整条链路（占位 → 准备 → 取消闸门 → 提交 → 统一释放）都在 runSend 里。
+   *
+   * 抽出去的原因很具体：engine 依赖 IndexedDB 与 Capacitor，node 里跑不起来，
+   * 所以「登录期间点了停止，回来还会不会继续发」这种问题，只有把业务编排放在
+   * 一个可注入依赖的函数里才测得动 —— 否则测试只能在测试文件里自己抄一遍流程，
+   * 那证明的是测试代码，不是生产代码（三审意见）。
+   *
+   * 取消判断（signal.aborted）也在 runSend 里：webChatReady / loginWebChat 每个
+   * await 之后、以及进入 commit 之前都会复查，取消之后不会再建会话、不会落库、
+   * 不会触发 onAccepted、也不会起模型请求。
+   */
+  const outcome = await runSend({
+    begin: beginTurn,
+    end: endTurn,
+    notify: (message) => useAppStore.getState().actions.showToast(message),
+    runLocalCommand: (signal) => runLocalCommand(trimmed, attachments, signal),
+    runOfflineReply: (signal) => runOfflineReply(trimmed, attachments, signal),
+    hasApiKey: hasApiKey(effective),
+    isWebChatProvider: isWebChatProvider(effective),
+    webChatReady,
+    loginWebChat,
+    commit: (turn) => runSendCommit({
+      store,
+      settings: effective,
+      trimmed,
+      attachments,
+      options,
+      signal: turn.abort.signal,
+    }),
+    settle: () => {
+      useAppStore.getState().actions.setSending(false)
+      useAppStore.getState().actions.endLive()
+    },
+  })
+  return outcome.accepted
+}
 
-  // 没接 Key 不等于「什么都不能做」：虎鲸仍然在，只是暂时说不了长话。
-  // 所以这里绝不把用户强行弹到设置页——那会打断每一次普通对话。
-  // 只把消息照常存下来，回一句本地短话，并在输入框上方留一个可点的提示。
-  if (hasApiKey(settings) === false) {
-    return await runOfflineReply(trimmed, attachments)
-  }
+/**
+ * 一轮发送的「提交」阶段：建会话 → 写用户消息 → onAccepted → 起模型请求。
+ *
+ * 只有 runSend 通过了取消闸门才会调到这里 —— 这也是为什么取消之后不会出现
+ * 「消息还是发出去了」：这四条副作用全在这个函数里。
+ */
+async function runSendCommit(input: {
+  store: ReturnType<typeof useAppStore.getState>
+  settings: Settings
+  trimmed: string
+  attachments: Attachment[]
+  options: { onAccepted?: () => void }
+  signal: AbortSignal
+}): Promise<boolean> {
+  const { store, settings, trimmed, attachments, options, signal } = input
 
-  // 网页账号模式：附件要走网页账号的上传接口（纯 HTTP 模式支持；网页窗遥控模式会提示）。
-  // 这里不再一刀切拒绝，交给 deepseek.ts 的网页链路处理。
-
-  // 网页账号模式的前置条件：有可用的登录态（HTTP 模式），或者网页窗开着
-  // （DOM 遥控后备）。两者都没有才需要用户去登录——而且登录一次就行，
-  // 之后窗口关不关都不影响聊天。
-  if (isWebChatProvider(settings)) {
-    const ready = await webChatReady()
-    if (!ready) {
-      const login = await loginWebChat()
-      if (!login.ok) {
-        useAppStore.getState().actions.showToast(login.message ?? '网页账号还没登录；请在弹出的窗口里登录一次')
-        return false
-      }
-      useAppStore.getState().actions.showToast('网页账号已连接；以后不用再登录了')
-    }
-  }
-
-  busy = true
-  activeAbort = new AbortController()
-  const signal = activeAbort.signal
   store.actions.setNotice('')
   stageBridge.current?.pulse('send')
 
-  // 从这里到 runAssistantTurn 结束，必须整段包在 try/finally 里。
-  // 旧写法把「建会话 / 落用户消息 / 改标题」三个 await 留在 try 外面，任何一步
-  // 抛错都会让 busy 永远停在 true —— 发送键卡成「停止」，只能重启进程才恢复
-  // （BUG-REVIEW P0-2）。accepted 记「用户消息是否已落库」，失败时决定输入框
-  // 要不要清空；stream 非空表示已经进入生成阶段（失败才需要落一条助手消息）。
   let accepted = false
   let stream: { conversationId: string; history: ChatMessage[] } | null = null
   try {
@@ -296,6 +367,8 @@ export async function sendMessage(text: string, attachments: Attachment[] = []):
     }
     await store.actions.appendMessage(userMessage)
     accepted = true
+    // 用户消息已落库：立刻通知调用方（输入框可以在这一刻清空，不必等整轮生成结束）。
+    options.onAccepted?.()
 
     const attachmentTitle = attachments[0]?.name
     const titleSource = trimmed !== '' ? trimmed : attachmentTitle ?? '新的对话'
@@ -352,12 +425,6 @@ export async function sendMessage(text: string, attachments: Attachment[] = []):
         bodyMind.note('error', '你和用户的连接刚刚断了一下')
       }
     }
-  } finally {
-    turnNodeId = null
-    useAppStore.getState().actions.setSending(false)
-    useAppStore.getState().actions.endLive()
-    activeAbort = null
-    busy = false
   }
 
   return accepted
@@ -370,9 +437,13 @@ export async function sendMessage(text: string, attachments: Attachment[] = []):
  * planGroupRound 排出的顺序逐个跑 runAssistantTurn（每个都带着 respondAs）。
  * 被点名的助手一定开口；其余成员可以在允许时选择 <pass/> 跳过，省 token。
  */
-export async function sendGroupMessage(text: string, attachments: Attachment[] = []): Promise<boolean> {
+export async function sendGroupMessage(
+  text: string,
+  attachments: Attachment[] = [],
+  options: { onAccepted?: () => void } = {},
+): Promise<boolean> {
   const trimmed = text.trim()
-  if ((trimmed === '' && attachments.length === 0) || busy) return false
+  if ((trimmed === '' && attachments.length === 0) || turnGate.isBusy()) return false
   const store = useAppStore.getState()
   const settings = store.settings
   const conversationId = store.activeId
@@ -390,21 +461,21 @@ export async function sendGroupMessage(text: string, attachments: Attachment[] =
     || !hasApiKey(settings)
     || isWebChatProvider(settings)
   ) {
-    return sendMessage(text, attachments)
+    return sendMessage(text, attachments, options)
   }
 
   const members = (conversation.members ?? [])
     .map((id) => settings.assistants.find((item) => item.id === id))
     .filter((item): item is Assistant => item !== undefined)
-  if (members.length === 0) return sendMessage(text, attachments)
+  if (members.length === 0) return sendMessage(text, attachments, options)
 
   const groupSettings = conversation.groupSettings ?? { gapMs: 1500, allowChatter: false, maxTurnsPerRound: 3 }
   const { speakers, named } = planGroupRound(members, trimmed, groupSettings)
-  if (speakers.length === 0) return sendMessage(text, attachments)
+  if (speakers.length === 0) return sendMessage(text, attachments, options)
 
-  busy = true
-  activeAbort = new AbortController()
-  const signal = activeAbort.signal
+  const turn = beginTurn()
+  if (turn === null) return false
+  const signal = turn.abort.signal
   store.actions.setNotice('')
   stageBridge.current?.pulse('send')
 
@@ -423,6 +494,8 @@ export async function sendGroupMessage(text: string, attachments: Attachment[] =
     }
     await store.actions.appendMessage(userMessage)
     accepted = true
+    // 用户消息已落库：立刻通知调用方清空输入框（群聊同样要立刻清）。
+    options.onAccepted?.()
     store.actions.setSending(true, conversationId)
 
     if (conversation.title === '新的对话') {
@@ -459,10 +532,10 @@ export async function sendGroupMessage(text: string, attachments: Attachment[] =
   } catch (error) {
     useAppStore.getState().actions.showToast(errorText(error))
   } finally {
+    // 群聊也要按归属复位：这里以前漏清 turnNodeId，下一轮消息会挂到上一轮的节点上。
+    endTurn(turn)
     useAppStore.getState().actions.setSending(false)
     useAppStore.getState().actions.endLive()
-    activeAbort = null
-    busy = false
   }
   return accepted
 }
@@ -529,14 +602,17 @@ async function runAssistantTurn(options: {
       ? resolveAssistantConfig(options.settings, options.respondAs)
       : conversationConfig(options.settings, conversation)
     // 助手可以覆盖模型 / 温度 / 思考强度 / 回顾 / 时间提醒；没覆盖的跟随全局。
-    const settings: Settings = {
+    // 但「全局选了网页账号」是账号模式，不许被助手/快照拽回 API 模型（真机 401 的根因）。
+    // 最后再过一道网页账号总闸：群聊里 respondAs 用的是**那个助手自己的**模型，
+    // 老对话用的是自己的快照，两条路都不经过模型选择器（见 lib/web-gate.ts）。
+    const settings: Settings = applyWebGate({
       ...options.settings,
-      model: cfg.model,
+      model: isWebChatModel(options.settings.model) ? options.settings.model : cfg.model,
       temperature: cfg.temperature,
       thinkingEffort: cfg.thinkingEffort,
       recentChats: cfg.recentChats,
       timeReminder: cfg.timeReminder,
-    }
+    }).settings
     // 走不走网页账号，以「这段对话实际用的模型」为准（和 streamChat 里的判断同源）。
     // 用全局设置判断会漏掉「对话快照是网页模型、全局已经切回 API」的情况。
     const webMode = isWebChatProvider(settings)
@@ -632,6 +708,8 @@ async function runAssistantTurn(options: {
     let lengthRetries = 0
     let iteration = 0
     while (iteration < MAX_TOOL_ITERATIONS) {
+      // 停止之后不要再来一轮：否则会为一次已经取消的生成再付一次请求（T-05）。
+      if (signal.aborted) break
       iteration += 1
       useAppStore.getState().actions.startLive(conversationId)
       stageBridge.current?.pulse('think')
@@ -720,10 +798,28 @@ async function runAssistantTurn(options: {
               schedule()
             },
           },
+        }).finally(() => {
+          /*
+           * 收掉这一轮的 debounce 定时器 —— 成功、抛错、被 abort 三条路都要收。
+           *
+           * schedule() 每 33ms 排一次 flush()，而 flush 会无条件 updateLive()。
+           * 以前只有「streamChat 正常返回」这条路上会走到下面的 flush()，
+           * 网络中断 / SSE error / 400 退避耗尽时 streamOnce 直接抛出去，
+           * 定时器留在那儿：33ms 后照样 updateLive 一次。如果这时新一轮已经
+           * startLive()（store 里是无条件覆盖），上一轮的半截正文就写进了
+           * 新一轮的占位气泡（BUG-REVIEW「幽灵气泡」）。
+           * bodyMind.drainEvents() 同理 —— 被跳过的那些事件会带到下一轮去。
+           */
+          if (timer !== undefined) {
+            window.clearTimeout(timer)
+            timer = undefined
+          }
+          pendingFlush = false
+          // 提示词已经发出去了，它引用的那些事件就算花掉了 —— 抛错时也要清，
+          // 否则它们会被带进下一轮的人设里。
+          bodyMind.drainEvents()
         })
         flush()
-        // The prompt has been sent, so the events it quoted are spent.
-        bodyMind.drainEvents()
         return streamed
       }
 
@@ -777,6 +873,20 @@ async function runAssistantTurn(options: {
       // 群聊「跳过」：模型不想接话时只回 <pass/>，这一轮不落库、不显示。
       const passed = options.allowPass === true && finalContent.trim() === '<pass/>'
 
+      /*
+       * 被停止的那一轮，tool_calls 一个都不能留。
+       *
+       * 模型吐 tool_calls 是「流式」的：名字先到、参数后到。用户在参数写一半时按停止，
+       * deepseek.ts 的 finalizeTools 仍会把这条只有名字的 call 定稿成非空 toolCalls。
+       * 一旦它跟着 assistant 消息落库，下一轮请求里就会出现 assistant.tool_calls
+       * 却没有配对的 role:'tool' 消息 —— 服务端直接 400，用户下一条消息根本发不出去
+       * （BUG-REVIEW T-04）。
+       *
+       * 「停止」的语义就是这一轮不算数，所以连 workspaceName 那个标签也一起丢掉。
+       */
+      const usableToolCalls = result.aborted || result.toolCalls.length === 0
+        ? undefined
+        : result.toolCalls
       const assistant: ChatMessage = {
         id: `msg_${nanoid(10)}`,
         conversationId,
@@ -793,9 +903,9 @@ async function runAssistantTurn(options: {
         content: finalContent,
         reasoning: (result.reasoning || reasoning).trim() || undefined,
         thinkingMs,
-        toolCalls: result.toolCalls.length > 0 ? result.toolCalls : undefined,
+        toolCalls: usableToolCalls,
         // 工具调用行要标出这段对话绑定的项目，别让用户猜文件写去了哪里。
-        ...(result.toolCalls.length > 0
+        ...(usableToolCalls !== undefined
           ? { workspaceName: useAppStore.getState().settings.workspaces.find((item) => item.id === workspaceId)?.name }
           : {}),
         createdAt: Date.now(),
@@ -852,20 +962,26 @@ async function runAssistantTurn(options: {
       // 方案甲：动作只由本地指令触发，模型不再驱动身体。
       // 这里只把解析出来的标签从正文里剥掉（防御性，模型万一还是写了也不外泄）。
 
-      if (result.usage) {
-        void addUsage({
-          conversationId,
-          model: settings.model,
-          inputTokens: result.usage.inputTokens ?? 0,
-          outputTokens: result.usage.outputTokens ?? 0,
-        })
-      } else {
-        void addUsage({
-          conversationId,
-          model: settings.model,
-          inputTokens: estimateTokens(JSON.stringify(buildRequestMessages({ settings, system: finalSystem, history }))),
-          outputTokens: estimateTokens(assistant.content),
-        })
+      /*
+       * 用量只在「这一轮真的跑完了」时记。
+       * 停止之后继续写用量表，等于让「停止」变成「停止但仍然记账」（T-06）。
+       */
+      if (!signal.aborted) {
+        if (result.usage) {
+          void addUsage({
+            conversationId,
+            model: settings.model,
+            inputTokens: result.usage.inputTokens ?? 0,
+            outputTokens: result.usage.outputTokens ?? 0,
+          })
+        } else {
+          void addUsage({
+            conversationId,
+            model: settings.model,
+            inputTokens: estimateTokens(JSON.stringify(buildRequestMessages({ settings, system: finalSystem, history }))),
+            outputTokens: estimateTokens(assistant.content),
+          })
+        }
       }
 
       if (result.aborted) {
@@ -883,6 +999,26 @@ async function runAssistantTurn(options: {
       let lastTargetWorkspaceId: string | undefined
       let lastWorkspaceName: string | undefined
       for (const call of result.toolCalls) {
+        /*
+         * 用户在工具执行到一半时按了停止：剩下的工具不要再跑，但**每条都必须补一条
+         * tool 消息并落库**。这条 assistant 消息的 tool_calls 已经写进去了，
+         * 少一条配对响应，下一轮请求就是 400（和 T-04 是同一件事的两面）。
+         */
+        if (signal.aborted) {
+          const skipped: ChatMessage = {
+            id: `msg_${nanoid(10)}`,
+            conversationId,
+            role: 'tool',
+            content: '已停止，这个工具没有执行。',
+            toolCallId: call.id,
+            toolName: call.function.name,
+            createdAt: Date.now(),
+            status: 'done',
+          }
+          await useAppStore.getState().actions.appendMessage(skipped)
+          history = [...history, skipped]
+          continue
+        }
         // 最后一个参数：参数半截（不是合法 JSON）= 被输出上限切断，绝不执行（见 runTool）。
         // 保持一行是刻意的 —— test/sending-state.test.ts 用文本断言守着「本轮 signal 一路
         // 传到工具调用」这条线，拆成多行就会把它误判成回归。
@@ -922,6 +1058,14 @@ async function runAssistantTurn(options: {
     if (iteration >= MAX_TOOL_ITERATIONS) {
       useAppStore.getState().actions.setNotice(`工具调用到了 ${MAX_TOOL_ITERATIONS} 轮上限，我先停在这里。说「继续」我接着做剩下的部分。`)
     }
+
+    /*
+     * 被停止的这一轮不做收尾记账（T-06）。
+     *
+     * 不写摘要 / 不抽记忆 / 不自动压缩 —— 压缩会真的再发一次网络请求，
+     * 「停止」之后再花一次钱说不过去。
+     */
+    if (signal.aborted) return { spoke: lastAssistantId !== null }
 
     await useAppStore.getState().actions.bumpConversation({
       summary: lastReply.replace(/\s+/g, ' ').slice(0, 180),
@@ -967,7 +1111,7 @@ async function runAssistantTurn(options: {
       if (result.added + result.updated > 0) {
         void useAppStore.getState().actions.refreshMemories()
       }
-    })
+    }).catch(() => undefined)
     // 自动压缩：开关关掉时不跑，手动入口（compressNow）仍然可用。
     if (settings.autoCompress) void maybeCompress(conversationId, settings)
 
@@ -981,7 +1125,7 @@ async function runAssistantTurn(options: {
  * 用户点一下就走，看起来是同一段回答继续往下写。
  */
 export async function continueTurn(messageId: string): Promise<boolean> {
-  if (busy) {
+  if (turnGate.isBusy()) {
     useAppStore.getState().actions.showToast('还在回复中，等这一轮结束再继续')
     return false
   }
@@ -991,9 +1135,9 @@ export async function continueTurn(messageId: string): Promise<boolean> {
   const target = state.messages.find((item) => item.id === messageId)
   if (target === undefined || target.role !== 'assistant') return false
 
-  busy = true
-  activeAbort = new AbortController()
-  const signal = activeAbort.signal
+  const turn = beginTurn()
+  if (turn === null) return false
+  const signal = turn.abort.signal
   state.actions.setSending(true, conversationId)
   state.actions.setNotice('')
   stageBridge.current?.pulse('think')
@@ -1009,10 +1153,10 @@ export async function continueTurn(messageId: string): Promise<boolean> {
     useAppStore.getState().actions.showToast(errorText(error))
     stageBridge.current?.pulse('error')
   } finally {
+    // 续写以前也漏清 turnNodeId，同样按归属复位（T-08）。
+    endTurn(turn)
     useAppStore.getState().actions.setSending(false)
     useAppStore.getState().actions.endLive()
-    activeAbort = null
-    busy = false
   }
   return true
 }
@@ -1177,8 +1321,9 @@ async function runTool(
     }
   }
   // 先把媒体写进表，再 append 消息：Chat 渲染时引用必须已经能查到。
+  // 被停止时不再写媒体：消息本身照旧要落（保持配对），但字节没必要永久留在库里（T-05）。
   const media: MessageMediaRef[] = []
-  if (mediaDrafts.length > 0) {
+  if (mediaDrafts.length > 0 && !signal.aborted) {
     try {
       for (const draft of mediaDrafts) {
         const record: MediaRecord = {
@@ -1192,6 +1337,16 @@ async function runTool(
         media.push(mediaRefOf(record))
       }
     } catch (error) {
+      /*
+       * 回滚（T-14）：媒体先写库、消息后写库，中间任何一步抛错都会留下
+       * messageId 指向「不存在的消息」的孤儿媒体 —— 界面上永远看不见，
+       * 字节却永久占着配额。db.ts 已有 deleteMediaByMessage，把这一批删干净。
+       *
+       * 注意这里是**回滚**，不是「先 append 占位消息再写媒体」：后者与上面
+       * 「引用必须先能查到」的渲染顺序冲突，也会破坏 T-05 的停止语义。
+       */
+      await deleteMediaByMessage(messageId).catch(() => undefined)
+      media.length = 0
       resultText = `${resultText}（媒体保存失败：${errorText(error)}）`
     }
   }
@@ -1207,7 +1362,13 @@ async function runTool(
     createdAt: Date.now(),
     status: 'done',
   }
-  await useAppStore.getState().actions.appendMessage(message)
+  try {
+    await useAppStore.getState().actions.appendMessage(message)
+  } catch (error) {
+    // 消息最终没落库：上面写进去的媒体同样成了孤儿，一起收掉再抛（T-14）。
+    if (media.length > 0) await deleteMediaByMessage(messageId).catch(() => undefined)
+    throw error
+  }
   return { message, changed, targetWorkspaceId, workspaceName }
 }
 
@@ -1216,7 +1377,7 @@ async function runTool(
  * 之前的历史（到上一条用户消息为止）保持不变。
  */
 export async function regenerateAtMessage(messageId: string): Promise<boolean> {
-  if (busy) return false
+  if (turnGate.isBusy()) return false
   const store = useAppStore.getState()
   const settings = store.settings
   if (hasApiKey(settings) === false) {
@@ -1237,9 +1398,9 @@ export async function regenerateAtMessage(messageId: string): Promise<boolean> {
 
   // 从这里开始会改库、会发请求，所以先把 busy 占住：快速双击否则会并发起两轮，
   // 而全局只有一个 activeAbort，先启动的那轮会失去 abort 句柄（BUG-REVIEW P1-3）。
-  busy = true
-  activeAbort = new AbortController()
-  const signal = activeAbort.signal
+  const turn = beginTurn()
+  if (turn === null) return false
+  const signal = turn.abort.signal
   turnNodeId = nodeId
   try {
     // 该节点已有的全部候选在库里需要一起「取消选中」，只留新生成的那条。
@@ -1259,11 +1420,9 @@ export async function regenerateAtMessage(messageId: string): Promise<boolean> {
     useAppStore.getState().actions.endLive()
     useAppStore.getState().actions.showToast(signal.aborted ? '已停止生成' : message)
   } finally {
-    turnNodeId = null
+    endTurn(turn)
     useAppStore.getState().actions.setSending(false)
     useAppStore.getState().actions.endLive()
-    activeAbort = null
-    busy = false
   }
   // 重新拉一遍，保证榜单/分支计数与库一致。
   await store.actions.openConversation(conversationId)
@@ -1275,7 +1434,7 @@ export async function regenerateAtMessage(messageId: string): Promise<boolean> {
  * 然后从这条位置继续生成。
  */
 export async function editAndResend(messageId: string, text: string): Promise<boolean> {
-  if (busy) return false
+  if (turnGate.isBusy()) return false
   const trimmed = text.trim()
   if (trimmed === '') return false
   const store = useAppStore.getState()
@@ -1301,9 +1460,9 @@ export async function editAndResend(messageId: string, text: string): Promise<bo
   const outgoing = applyMessageTemplate(activeCfg.messageTemplate, trimmed)
 
   // 先占住 busy，再动库和请求（同 regenerate，BUG-REVIEW P1-3）。
-  busy = true
-  activeAbort = new AbortController()
-  const signal = activeAbort.signal
+  const turn = beginTurn()
+  if (turn === null) return false
+  const signal = turn.abort.signal
   turnNodeId = null
   try {
     // 改这条用户消息的正文（保留 attachments），并删掉它之后的所有消息。
@@ -1329,11 +1488,9 @@ export async function editAndResend(messageId: string, text: string): Promise<bo
     useAppStore.getState().actions.endLive()
     useAppStore.getState().actions.showToast(signal.aborted ? '已停止生成' : message)
   } finally {
-    turnNodeId = null
+    endTurn(turn)
     useAppStore.getState().actions.setSending(false)
     useAppStore.getState().actions.endLive()
-    activeAbort = null
-    busy = false
   }
   await store.actions.openConversation(conversationId)
   return true

@@ -107,6 +107,18 @@ export function webChatAvailable(): boolean {
   return isAndroid
 }
 
+/**
+ * 上一次网页请求报过「登录过期 / 未登录」。
+ *
+ * 本地存的 token 只要**存在**，`hasSession()` 就返回 true —— 但它可能早就失效了。
+ * 典型场景（真机复现）：用户在网页窗里退出登录、又重新登录；App 这边存的还是旧 token，
+ * 于是 `webChatReady()` 一直是 true、`loginWebChat()` 也因为有 token 直接返回成功，
+ * 永远不去重新采集 —— 表现就是「重装后第一次能用，退出重登之后再也发不出去」。
+ *
+ * 所以一旦发送端报 no-session：清掉本地 token，并置这个标记让下一次强制重走登录。
+ */
+let sessionInvalid = false
+
 /** 本机有没有登录态（HTTP 模式用；DOM 遥控不依赖它）。 */
 export async function webChatLoggedIn(): Promise<boolean> {
   const native = electron()
@@ -132,7 +144,7 @@ export async function webChatLoggedIn(): Promise<boolean> {
  * 登录流程：打开网页窗让用户登录，然后采集登录态。
  * 返回是否成功采集（失败时给一句人话）。
  */
-export async function loginWebChat(): Promise<{ ok: boolean; message?: string }> {
+async function loginWebChatInner(): Promise<{ ok: boolean; message?: string }> {
   // Android：launch 开网页窗 → 轮询采集，直到用户登录成功或超时。
   if (isAndroid) {
     if (await webChatLoggedIn()) return { ok: true }
@@ -172,6 +184,12 @@ export async function loginWebChat(): Promise<{ ok: boolean; message?: string }>
   const captured = await native.webApiCapture()
   if (!captured.ok) return { ok: false, message: captured.error ?? '采集登录态失败' }
   return { ok: true }
+}
+
+export async function loginWebChat(): Promise<{ ok: boolean; message?: string }> {
+  const result = await loginWebChatInner()
+  if (result.ok) sessionInvalid = false
+  return result
 }
 
 /** 等用户登录的上限（扫码、人机校验都需要时间）。 */
@@ -245,6 +263,11 @@ export async function readWebChatState(): Promise<RelayState | null> {
 /** 网页窗是否就绪（DOM 遥控路）。 */
 export async function webChatReady(): Promise<boolean> {
   if (!webChatAvailable()) return false
+  /*
+   * 上次发送已经判定登录态失效：即使本地还留着 token 也别再当成就绪，
+   * 否则永远走不到「重新登录 + 重新采集」那一步。
+   */
+  if (sessionInvalid) return false
   if (await httpModeReady()) return true
   const state = await readWebChatState()
   return state !== null
@@ -485,7 +508,7 @@ async function uploadWebImage(dataUrl: string, name: string): Promise<{ ok: bool
  * `onDelta` / `onReasoning` 收到的是**完整正文**（不是增量），调用方自己 diff；
  * 这样事件丢帧也不会漏字。
  */
-export async function sendViaWebChat(text: string, options: SendOptions = {}): Promise<WebChatReply> {
+async function sendViaWebChatInner(text: string, options: SendOptions = {}): Promise<WebChatReply> {
   if (!webChatAvailable()) {
     return { status: 'unsupported', content: '', message: '这个版本不支持网页账号模式' }
   }
@@ -538,6 +561,33 @@ export async function sendViaWebChat(text: string, options: SendOptions = {}): P
 
   // 后备：DOM 遥控。
   return await sendViaDom(text, options)
+}
+
+/**
+ * 发一条网页消息。
+ *
+ * 这里是**唯一**能观察到「网页那边说登录态失效」的地方，所以自我修复也放在这：
+ * 一旦返回 no-session，就把本地 token 清掉并标记失效 —— 下一次 `webChatReady()`
+ * 会返回 false，从而真正走一次「登录 + 采集」。
+ *
+ * 以前什么都不做：token 一直留在本地，`webChatReady()` 永远为真、`loginWebChat()`
+ * 因为「已经有 token」直接返回成功，于是重装后能用一次、退出重登之后就永久坏掉。
+ */
+export async function sendViaWebChat(text: string, options: SendOptions = {}): Promise<WebChatReply> {
+  const first = await sendViaWebChatInner(text, options)
+  if (first.status !== 'no-session') return first
+
+  /*
+   * 登录态被判定失效 —— 典型场景就是「用户在网页窗里退出登录又重新登录」，
+   * 而 App 这边存的还是旧 token。自愈一次：
+   *   清掉旧 token → 重新采集登录态（网页窗里通常已经登录好了，直接采集即可）→ 重发。
+   * 只重试一次；登录没成功就把原始错误交回去，别把用户困在重试里。
+   */
+  sessionInvalid = true
+  await logoutWebChat()
+  const login = await loginWebChat()
+  if (!login.ok) return first
+  return await sendViaWebChatInner(text, options)
 }
 
 /**

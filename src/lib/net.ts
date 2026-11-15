@@ -295,12 +295,18 @@ function mimeOfHeaders(headers: Record<string, string>): string {
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
-  let binary = ''
+  /*
+   * 用数组收集再一次性 join（T-20）。
+   *
+   * 以前是 `binary += ...` 反复拼：一张 16MB 的图会拼出几十 MB 的中间字符串，
+   * 峰值常驻内存是最终结果的数倍（WebView 里很容易直接 OOM）。
+   */
+  const parts: string[] = []
   const chunk = 0x8000
   for (let index = 0; index < bytes.length; index += chunk) {
-    binary += String.fromCharCode(...bytes.subarray(index, index + chunk))
+    parts.push(String.fromCharCode(...bytes.subarray(index, index + chunk)))
   }
-  return btoa(binary)
+  return btoa(parts.join(''))
 }
 
 function base64ToBytes(base64: string): Uint8Array {

@@ -34,31 +34,32 @@ import {
 import { MAX_ATTACHMENTS, attachmentKindLabel, formatFileSize, prepareAttachments } from '../lib/attachments'
 import { continueTurn, editAndResend, regenerateAtMessage, sendGroupMessage, sendMessage, stopSending } from '../lib/engine'
 import { WEB_CHAT_MODEL_INFO, isWebChatModel, modelInfo } from '../lib/models'
+import { webChatModelVisible } from '../lib/web-gate'
 import { visionOf, type VisionVerdict } from '../lib/capability'
 import { useAppStore, branchInfo, type SheetSize } from '../lib/store'
 import { currentProvider, hasApiKey, providerModels } from '../lib/providers'
-import { conversationConfig, applyRegexes } from '../lib/assistant'
+import { conversationConfig, applyRegexes, findAssistant } from '../lib/assistant'
 import type { AssistantRegex } from '../lib/types'
 import {
   exportableMessages,
   messageMarkdownFileName,
   messageToMarkdown,
 } from '../lib/export-markdown'
-import { shareMarkdown } from '../lib/platform'
+import { shareMarkdown, writeClipboardText } from '../lib/platform'
+import { createComposerClear } from '../lib/composer-clear'
 import { webChatAvailable } from '../lib/web-chat'
 import { ExportDialog } from './ExportDialog'
 import { SaveToWorkshopDialog, type SnippetDraft } from './SaveToWorkshop'
 import type { Attachment, ChatMessage, Settings, ThinkingEffort } from '../lib/types'
 import { CodeRunModal } from './CodeRunModal'
 import { CompressDialog } from './CompressDialog'
-import { NewChatSheet } from './NewChatSheet'
 import { SearchPanel } from './SearchPanel'
 import { MediaToolCard } from './MediaToolCard'
 import { SpeechButton } from './SpeechButton'
 import { TurnNavigator } from './TurnNavigator'
 import { QuickCommands } from './QuickCommands'
 import { buildTurns } from '../lib/turns'
-import { Avatar, assistantAvatarProps } from './Avatar'
+import { Avatar, assistantAvatarProps, messageAvatarProps } from './Avatar'
 import { Markdown } from './Markdown'
 import { IconButton, Modal, Spinner } from './ui'
 import { confirmDialog } from './ConfirmDialog'
@@ -95,11 +96,18 @@ function catalogModelOptions(settings: Settings): { id: string; hint: string; ta
     }
     return { id, hint, tags }
   })
-  // 当前模型不在目录里也要能看见、能选（例如手填的自定义模型名）。
-  if (settings.model !== '' && !options.some((option) => option.id === settings.model)) {
+  /*
+   * 当前模型不在目录里也要能看见、能选（例如手填的自定义模型名）。
+   *
+   * 网页账号模型不在此列：它出不出现只由「纸雕虎鲸」开关决定（见 lib/web-gate.ts）。
+   * 开关关着时哪怕 settings.model 还指着它（store 会把它切走，但可能有先后），
+   * 也不能从这里漏出来。
+   */
+  if (settings.model !== '' && !isWebChatModel(settings.model) && !options.some((option) => option.id === settings.model)) {
     options.unshift({ id: settings.model, hint: '目录外 ID，仍可直接发送', tags: ['目录外'] })
   }
-  if (!options.some((option) => option.id === WEB_CHAT_MODEL_INFO.id)) {
+  // 网页账号模型：跟着纸雕虎鲸开关走，默认不出现。
+  if (webChatModelVisible(settings) && !options.some((option) => option.id === WEB_CHAT_MODEL_INFO.id)) {
     options.push({ id: WEB_CHAT_MODEL_INFO.id, hint: WEB_CHAT_MODEL_INFO.hint, tags: [...WEB_CHAT_MODEL_INFO.tags] })
   }
   // 「看图」徽章统一在这里、由 visionOf 贴：判据和附件闸门是同一个函数，
@@ -282,11 +290,20 @@ function Bubble(props: {
   // 群聊里每条消息要显示「是哪个助手说的」。这里订阅 assistants 数组本身
   // （引用稳定，只有真的增删改时才会变），避免选择器返回新对象触发无限重渲染。
   const assistants = useAppStore((state) => state.settings.assistants)
+  // 取整个 settings 而不是在 selector 里算头像：selector 返回新对象会让 zustand 无限重渲染。
+  const settings = useAppStore((state) => state.settings)
+  const conversation = useAppStore((state) => state.conversations.find((item) => item.id === props.conversationId))
   const speaker = message.assistantId === undefined
     ? undefined
     : assistants.find((item) => item.id === message.assistantId)
   const speakerName = message.assistantName ?? speaker?.name ?? assistantName
-  const speakerAvatar = speaker !== undefined ? assistantAvatarProps(speaker) : undefined
+  /*
+   * 头像跟着「这条是谁说的」走：消息自带的 assistantId → 这段对话绑定的助手 → 设置级。
+   *
+   * 以前只按「当前助手」取，用户在同一个对话里换了助手，连历史消息的头像都会被改掉 ——
+   * 那些消息明明是上一个助手说的。现在历史用作者，只有正在生成的那条才用当前助手。
+   */
+  const avatarProps = messageAvatarProps({ settings, conversation, message, assistants })
   const regexesJson = useAppStore((state) => {
     const conversation = state.conversations.find((item) => item.id === state.activeId)
     return JSON.stringify(conversationConfig(state.settings, conversation).regexes)
@@ -337,12 +354,16 @@ function Bubble(props: {
   }
 
   const copy = async (): Promise<void> => {
-    try {
-      await navigator.clipboard.writeText(message.content)
-      actions.showToast('已复制')
-    } catch {
-      actions.showToast('复制失败')
-    }
+    /*
+     * 必须走 platform.writeClipboardText，不能直接用 navigator.clipboard。
+     *
+     * 真机上「点复制失败」的根因就在这里：Android WebView 里
+     * navigator.clipboard.writeText 经常直接 reject（非安全上下文 / 没有剪贴板权限），
+     * 而 writeClipboardText 在安卓上会先走原生 ClipboardManager（DeepSeaClipboard 插件），
+     * 失败才落回网页实现。项目里其他复制入口（助手页、选中复制条）早就用的是它。
+     */
+    const ok = await writeClipboardText(message.content)
+    actions.showToast(ok ? '已复制' : '复制失败，可以长按选中再复制')
   }
 
   const startEdit = (): void => {
@@ -441,11 +462,7 @@ function Bubble(props: {
         <div className="bubble-continued-divider" aria-hidden="true"><span>续写</span></div>
       ) : (
         <div className="bubble-author">
-          {speakerAvatar !== undefined ? (
-            <Avatar role="assistant" size={17} avatarSrc={speakerAvatar.avatarSrc} emoji={speakerAvatar.emoji} />
-          ) : (
-            <Avatar role="assistant" size={17} />
-          )}
+          <Avatar role="assistant" size={17} {...(avatarProps ?? {})} />
           <span>{speakerName}</span>
           <time>{timeOf(message.createdAt)}</time>
           {message.status === 'error' && <em>出错</em>}
@@ -599,7 +616,6 @@ export function Chat() {
   const [exportOpen, setExportOpen] = useState(false)
   const [snippetDraft, setSnippetDraft] = useState<SnippetDraft | null>(null)
   const [searchOpen, setSearchOpen] = useState(false)
-  const [newChatOpen, setNewChatOpen] = useState(false)
   const [flashId, setFlashId] = useState<string | null>(null)
   const turns = useMemo(() => buildTurns(messages), [messages])
   const [activeAnchor, setActiveAnchor] = useState<string | null>(null)
@@ -609,6 +625,17 @@ export function Chat() {
   const [input, setInput] = useState('')
   const [runner, setRunner] = useState<{ code: string; lang: string } | null>(null)
   const [attachments, setAttachments] = useState<Attachment[]>([])
+  /*
+   * 附件列表的实时镜像。
+   *
+   * 清空输入框发生在异步回调里（engine 落库之后 / 整轮生成结束之后），
+   * 那时闭包里的 `attachments` 还是点击发送那一次渲染的值 —— 用它做「有没有变化」
+   * 的判断永远是「没变」，用户生成期间新加 / 替换的附件就会被一起清掉。
+   */
+  const attachmentsRef = useRef<Attachment[]>([])
+  useEffect(() => {
+    attachmentsRef.current = attachments
+  }, [attachments])
   const [preparing, setPreparing] = useState(false)
   const [dragActive, setDragActive] = useState(false)
   const [thinkingOpen, setThinkingOpen] = useState(false)
@@ -940,9 +967,21 @@ export function Chat() {
         return
       }
     }
-    void actions.setSettings({ model: id })
+    /*
+     * 助手可以单独覆盖模型（助手编辑里那项「跟随全局模型」）。一旦它被设成某个具体
+     * 模型，就会盖住这里选的值 —— 真机上的表现就是「切回网页账号又跳回助手的 API
+     * 模型」，然后一路报「还没有填 API Key」。手动选模型是明确意图，所以先把当前
+     * 助手的覆盖清掉，让它回到「跟随全局」。
+     *
+     * 三处都 await：以前是 void，紧接着发送时可能读到还没落盘的旧快照。
+     */
+    const before = useAppStore.getState()
+    const conversation = before.conversations.find((item) => item.id === before.activeId)
+    const assistant = findAssistant(before.settings, conversation?.assistantId ?? before.settings.assistantId)
+    if (assistant.model !== '') await actions.updateAssistant(assistant.id, { model: '' })
+    await actions.setSettings({ model: id })
     // 对话快照也要跟着改，否则引擎下一轮仍用快照里的旧模型（和思考强度同一个坑）。
-    void actions.patchConversationConfig({ model: id })
+    await actions.patchConversationConfig({ model: id })
     closeModel(true)
   }
 
@@ -1027,25 +1066,53 @@ export function Chat() {
     const text = input.trim()
     if ((text === '' && attachments.length === 0) || sending || preparing) return
     let accepted = false
+    /*
+     * 用户消息一旦「成功落库」就立刻清空输入框 —— 这是 UI 反馈 #4 的要点。
+     *
+     * 以前是等 `await sendMessage()` 返回后才清，而 sendMessage 内部要
+     * `await runAssistantTurn()`（整轮回复生成完才返回），于是「正在回应」的
+     * 整段时间里，输入框都还留着刚发出去的那句话（截图里那个「暂留」）。
+     *
+     * 现在改成 engine 在 accepted 那一刻回调 onAccepted；「清不清、还能不能再清」
+     * 的决策收在 createComposerClear 里（src/lib/composer-clear.ts）：
+     *   - 主清空只要触发过，结尾的兜底就不再执行 —— 否则用户在生成期间重新敲出
+     *     同样的文本，兜底会把这份新输入删掉（审查意见 P1）；
+     *   - 兜底只服务本地指令 / 离线回复这类不走 onAccepted 的即时成功路径；
+     *   - 清空前要求文本与附件都还是发送时那份，不误删用户新加的东西。
+     */
+    const composer = createComposerClear({
+      /*
+       * 快照存的是**附件身份**（Attachment.id），不是数量。
+       * 只比数量的话，用户「删掉图 A 换成图 B」时数量仍是 1，会被误判成没变，
+       * 于是把 B 一起清掉（二审 P1）。
+       */
+      sent: { text, attachmentIds: attachments.map((item) => item.id) },
+      read: () => ({
+        text: inputRef.current?.value.trim() ?? '',
+        attachmentIds: attachmentsRef.current.map((item) => item.id),
+      }),
+      clear: () => {
+        setInput('')
+        setAttachments([])
+        // 自己发的消息一定要看到：把「贴底」打开，否则用户之前往上翻过的话，
+        // 新消息会安静地落在下面看不见。
+        stickToBottom.current = true
+        requestAnimationFrame(resizeInput)
+      },
+    })
     try {
       // 群聊走 sendGroupMessage（一个接一个说）；单聊仍走 sendMessage。
       const active = useAppStore.getState().conversations.find((item) => item.id === useAppStore.getState().activeId)
       accepted = active?.kind === 'group'
-        ? await sendGroupMessage(text, attachments)
-        : await sendMessage(text, attachments)
+        ? await sendGroupMessage(text, attachments, { onAccepted: composer.onAccepted })
+        : await sendMessage(text, attachments, { onAccepted: composer.onAccepted })
     } catch (error) {
       // engine 内部已经用 finally 兜住了发送状态；这里只防「连兜底都抛了」的极端情况，
       // 至少要让用户知道这次没发出去，而不是看着输入框发呆。
       actions.showToast(error instanceof Error ? error.message : '没发出去，再试一次')
     }
-    if (accepted) {
-      setInput('')
-      setAttachments([])
-      // 自己发的消息一定要看到：把「贴底」打开，否则用户之前往上翻过的话，
-      // 新消息会安静地落在下面看不见。
-      stickToBottom.current = true
-      requestAnimationFrame(resizeInput)
-    }
+    // 兜底：只处理没有触发 onAccepted 的即时成功路径（本地指令 / 离线回复）。
+    composer.settle(accepted)
   }
 
   function cycleSheet(): void {
@@ -1265,7 +1332,7 @@ export function Chat() {
             <IconButton label="历史对话" onClick={() => actions.setHistoryOpen(true)}>
               <History size={18} />
             </IconButton>
-            <IconButton label="新对话（可选群聊）" onClick={() => setNewChatOpen(true)}>
+            <IconButton label="新对话（可选群聊）" onClick={() => actions.setNewChatOpen(true)}>
               <Plus size={18} />
             </IconButton>
           </div>
@@ -1337,7 +1404,8 @@ export function Chat() {
           {live !== null && live.conversationId === activeId && (
             <article className="bubble bubble-assistant bubble-live">
               <div className="bubble-author">
-                <Avatar role="assistant" size={17} />
+                {/* 正在生成的那条属于「这段对话现在用的助手」，和上面的名字同源（activeConfig）。 */}
+                <Avatar role="assistant" size={17} {...assistantAvatarProps(activeConfig)} />
                 {/* 名字跟着当前助手走，别写死「深鲸」——切助手后这里要对得上。 */}
                 <span>{activeConfig.name}</span>
                 <em className="live-dot">{live.content.trim() !== '' ? '正在输入' : '正在思考'}</em>
@@ -1345,7 +1413,7 @@ export function Chat() {
               {live.reasoning.trim() !== '' && <ReasoningPanel text={live.reasoning} live />}
               {live.content.trim() !== '' ? (
                 <div className="bubble-body">
-                  <Markdown text={live.content} onRun={runSnippet} onSave={(code, lang) => void saveSnippet(code, lang)} />
+                  <Markdown text={live.content} streaming onRun={runSnippet} onSave={(code, lang) => void saveSnippet(code, lang)} />
                   <span className="caret" />
                 </div>
               ) : (
@@ -1657,7 +1725,6 @@ export function Chat() {
         preselectIds={exportIds ?? undefined}
       />
       <SaveToWorkshopDialog draft={snippetDraft} onClose={() => setSnippetDraft(null)} />
-      <NewChatSheet open={newChatOpen} onClose={() => setNewChatOpen(false)} />
     </div>
   )
 }

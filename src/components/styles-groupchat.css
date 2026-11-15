@@ -48,6 +48,16 @@
 }
 .newchat-item-name { flex: 1; font-size: 14px; }
 .newchat-item-tick { color: var(--aqua); font-weight: 700; }
+/*
+ * 群聊参数区（发言间隔 / 一轮最多几人 / 互相接话）。
+ * 以前这个包装 div 只有 className="newchat-group"，没有对应规则，于是它退化成
+ * 一个纯块级容器：和上面的助手列表之间没有任何分隔，几组设置直接贴在一起。
+ * 这里给它一条上分隔线，把「选人」和「群聊参数」两段分开。
+ */
+.newchat-group {
+  margin-top: 18px;
+  border-top: 1px solid var(--line);
+}
 .newchat-warn {
   margin: 14px 0 10px;
   padding: 10px 12px;

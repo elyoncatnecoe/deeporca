@@ -167,7 +167,15 @@ public class DeepSeaWebChatPlugin extends Plugin {
 
     @PluginMethod
     public void setContext(PluginCall call) {
-        WebChatRelay.setContext(call.getString("text", ""));
+        String text = call.getString("text", "");
+        WebChatRelay.setContext(text);
+        /*
+         * 空人设 = 助手被关掉了：把 HTTP 链路那份「已经拼过」的标记一起清掉。
+         *
+         * 不清的话，用户重新打开同一个助手、人设一个字都没变，WebApiClient 的去重
+         * 会认为 A 已经拼过而永远跳过。只清标记，网页线程 / 会话 id / 历史都不动。
+         */
+        if (text.isEmpty()) WebApiClient.clearPersonaCache();
         call.resolve();
     }
 }

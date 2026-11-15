@@ -30,7 +30,7 @@ import { visionOf, type VisionProvider } from '../lib/capability'
 import type { Settings, ThinkingEffort } from '../lib/types'
 import { webModeScript } from '../lib/web-mode'
 import { diagnoseWebChat, loginWebChat } from '../lib/web-chat'
-import { Avatar } from './Avatar'
+import { Avatar, currentAssistantAvatar } from './Avatar'
 import { IconButton, ScreenHeader, Select, Switch, type SelectOption } from './ui'
 import { confirmDialog } from './ConfirmDialog'
 
@@ -795,13 +795,19 @@ export function SettingsScreen() {
             <h2><UserRound size={17} /> 头像</h2>
             <p className="settings-hint">
               默认是内置的两张：助手用 DeepSeek 的蓝鲸标，你用那只水母。网页版贴的也是这两张。
+              开启「助手」时，助手页里那个助手自己的头像会覆盖这里的助手头像（网页端也一起覆盖）；
+              关掉助手后才用这里设的。
               上传的图只存在本机，不进备份、也不会跟着请求发出去；换设备就没了，得重传。
             </p>
             <div className="avatar-row">
-              <Avatar role="assistant" size={44} />
+              <Avatar role="assistant" size={44} {...currentAssistantAvatar(draft)} />
               <div>
                 <strong>助手</strong>
-                <small>对话气泡左上角</small>
+                <small>
+                  {draft.assistantsEnabled
+                    ? '当前由助手的头像覆盖；关掉助手后这里生效'
+                    : '对话气泡左上角'}
+                </small>
               </div>
               <div className="inline-actions">
                 <button type="button" className="ghost-button" onClick={() => pickAvatar('assistant')}>换一张</button>

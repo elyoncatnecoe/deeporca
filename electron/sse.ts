@@ -19,6 +19,8 @@
 export interface ReplyPatchReader {
   text: string
   reasoning: string
+  /** 服务端下发的「模板/拒绝」文案（TEMPLATE_RESPONSE），与真实正文分开存。 */
+  template: string
   messageId: number | null
   status: string | null
   usage: number | null
@@ -36,11 +38,14 @@ const REASONING_KINDS = new Set([
   'TOOL_FIND',
 ])
 
-const TEXT_KINDS = new Set(['RESPONSE', 'TEMPLATE_RESPONSE'])
+const TEXT_KINDS = new Set(['RESPONSE'])
+/** 模板/拒绝文案单独收：真实正文存在时不要把它拼进回答（否则「安全拦截」会把正文替换成一段抱歉）。 */
+const TEMPLATE_KINDS = new Set(['TEMPLATE_RESPONSE'])
 
 export class PatchReader implements ReplyPatchReader {
   text = ''
   reasoning = ''
+  template = ''
   messageId: number | null = null
   status: string | null = null
   usage: number | null = null
@@ -125,6 +130,10 @@ export class PatchReader implements ReplyPatchReader {
     const kind = String(type ?? '').toUpperCase()
     if (REASONING_KINDS.has(kind)) {
       this.reasoning += content
+      return
+    }
+    if (TEMPLATE_KINDS.has(kind)) {
+      this.template += content
       return
     }
     if (TEXT_KINDS.has(kind) || kind === '') {

@@ -122,6 +122,39 @@ test('冲突只在同一 scope+type 里判定，不跨桶误伤', () => {
   assert.deepEqual(planUpsert({ text: '用户住在上海', type: 'profile', scope: 'global' }, scoped), { action: 'add' })
 })
 
+test('T-13 前提核实：包含度恒 ≥ Jaccard，所以 planUpsert 里那两条判定线其实是一条', () => {
+  /*
+   * 这条不是「测某个函数返回什么」，而是守住一个数学事实：
+   *
+   *   jaccard    = 交集 / (|A| + |B| - 交集)
+   *   containment= 交集 / min(|A|, |B|)
+   *
+   * 因为 |A| + |B| - 交集 ≥ min(|A|, |B|)，分母更大 ⇒ jaccard 恒 ≤ containment。
+   * 于是以前那句 `Math.max(score, cover) > bestScore` **永远等价于** `cover > bestScore`，
+   * 也就是说「用 Jaccard 认矛盾」这条线从来没生效过，score 对判定毫无影响。
+   *
+   * 所以 T-13 描述的错配（「A 的 cover 高、B 的 jaccard 高，B 胜出后 bestCover 变小」）
+   * 在几何上不可能发生 —— 高 jaccard 必然伴随高包含度。真正该做的是把代码写清楚，
+   * 而不是拆成两个目标（拆了也永远指向同一条记录）。
+   */
+  const pairs: Array<[string, string]> = [
+    ['用户叫小林', '用户叫小林，是一名前端工程师'],
+    ['用户住在上海', '用户住在北京'],
+    ['一只猫', '一只猫和一只狗'],
+    ['alpha beta', 'alpha beta gamma delta'],
+    ['我在写 DeepSea 的记忆系统', 'DeepSea 的记忆系统今天又改了一版'],
+    ['完全不同的话题', '另起一条记忆'],
+  ]
+  for (const [a, b] of pairs) {
+    const left = tokenize(a)
+    const right = tokenize(b)
+    const score = jaccard(left, right)
+    const cover = containment(left, right)
+    assert.ok(score <= cover + 1e-12, `jaccard 反超了包含度：${a} / ${b} → ${score} > ${cover}`)
+    assert.equal(Math.max(score, cover), cover, 'Math.max(score, cover) 不等于 cover —— 前提变了，回去看 planUpsert')
+  }
+})
+
 test('重复检测：同一件事换个说法能认出来，无关的话不认', () => {
   assert.equal(looksLikeRepeat('我在写 DeepSea 的记忆系统', ['DeepSea 的记忆系统今天又改了一版']), true)
   assert.equal(looksLikeRepeat('我今天加班到十点', ['明天天气怎么样']), false)

@@ -15,6 +15,7 @@ import {
   parseGoogleEvent,
   type ToolDraft,
 } from './protocols'
+import { SseDecoder, type SseEvent } from './sse'
 
 export class ApiError extends Error {
   readonly status: number
@@ -266,7 +267,15 @@ export async function streamChat(options: {
   let finishReason: string | undefined
   let usage: TokenUsage | undefined
   const toolDrafts = new Map<number, ToolAccumulator>()
-  let buffer = ''
+  // SSE 解码器（规范实现，见 sse.ts）。以前这里是一个手写的 buffer + /\r?\n\r?\n/ 切分。
+  const sseDecoder = new SseDecoder()
+  /**
+   * 这一轮到底解析出过事件没有。
+   *
+   * 收尾时要靠它区分两种「什么都没拿到」：网关按 SSE 说话但正文确实为空（正常），
+   * 还是网关压根没按 SSE 回、整包 JSON 被当成流读进来（要兜底，见 runOnce）。
+   */
+  let sawPayload = false
 
   const handlePayload = (payload: string): boolean => {
     if (payload === '[DONE]') return true
@@ -379,23 +388,32 @@ export async function streamChat(options: {
     }
   }
 
-  /** 把一段原始文本喂给 SSE 解析器；返回 true 表示收到 [DONE]。 */
-  const consume = (chunk: string): boolean => {
-    buffer += chunk
-    while (true) {
-      const separator = /\r?\n\r?\n/.exec(buffer)
-      if (separator === null) break
-      const rawEvent = buffer.slice(0, separator.index)
-      buffer = buffer.slice(separator.index + separator[0].length)
-      const payload = rawEvent
-        .split(/\r?\n/)
-        .filter((line) => line.startsWith('data:'))
-        .map((line) => line.slice(5).trimStart())
-        .join('\n')
-      if (payload !== '' && handlePayload(payload)) return true
+  /**
+   * 处理一批已解析事件；返回 true 表示收到 [DONE]。
+   *
+   * 拆成「事件列表 → 结果」这一步，是为了让流中途（push）和收尾（flush）
+   * 走同一段逻辑 —— 以前收尾另外手写一次 consume('\n\n')，两边就漂了。
+   */
+  const consumeEvents = (events: SseEvent[]): boolean => {
+    for (const event of events) {
+      if (event.data === '') continue
+      // 见到任何一个带 data 的事件（含 [DONE]）就说明网关确实在按 SSE 说话。
+      sawPayload = true
+      if (handlePayload(event.data)) return true
+      /*
+       * 带 `event: error` 的帧：data 可能是 JSON 错误体（handlePayload 会抛），
+       * 也可能是纯文本（如「等待生成超时」）。以前只取 data: 行、JSON 解析失败就
+       * 静默丢掉，于是这类错误帧被吞，请求一直挂到超时。现在把它当错误抛出去。
+       */
+      if (event.event === 'error') {
+        throw new Error(event.data)
+      }
     }
     return false
   }
+
+  /** 把一段原始文本喂给 SSE 解析器；返回 true 表示收到 [DONE]。 */
+  const consume = (chunk: string): boolean => consumeEvents(sseDecoder.push(chunk))
 
   const resetStream = (): void => {
     content = ''
@@ -403,7 +421,8 @@ export async function streamChat(options: {
     finishReason = undefined
     usage = undefined
     toolDrafts.clear()
-    buffer = ''
+    sseDecoder.reset()
+    sawPayload = false
   }
 
   /**
@@ -447,6 +466,39 @@ export async function streamChat(options: {
       },
     )
     if (payloadError !== null) throw payloadError
+    /*
+     * 收尾 flush（T-10）：最后一个事件经常没有以空行结尾。
+     *
+     * 解码器只在空行处分事件，所以只要网关最后一段没跟着空行，那段就永远留在
+     * 解码器里被丢掉 —— 丢的往往正是 usage 或最后一段正文。
+     *
+     * 这里必须交给 flush()：它认得两种收尾，半行没切（buffer 非空），和
+     * `data: {...}\n` 这种只跟一个换行就断流（buffer 已空、事件还在解码器里）。
+     * 以前用 pending !== '' 当开关，后一种被当成「无事可做」，最后一帧直接吞掉。
+     */
+    if (!sawErrorStatus && !done) {
+      if (consumeEvents(sseDecoder.flush())) done = true
+    }
+    /*
+     * 另一半（T-10）：网关忽略 stream:true，直接回整包 JSON。
+     *
+     * 以前这里只看状态码，200 就当成功：正文一个字都没有，界面是空白气泡，
+     * 而且没有任何报错可以查。这里补一次整包解析，解析出正文就当成增量交给界面。
+     */
+    if (!sawErrorStatus && !sawPayload && response.status < 400) {
+      const text = response.text.trim()
+      if (text.startsWith('{')) {
+        try {
+          const fallback = parseCompleteContent(protocol, JSON.parse(text) as unknown)
+          if (fallback !== '') {
+            content = fallback
+            handlers?.onDelta?.(fallback)
+          }
+        } catch {
+          // 不是完整 JSON，或包是坏的：维持原样，交给上层按「空回复」处理。
+        }
+      }
+    }
     return { status: response.status, errorText: response.status >= 400 ? response.text : '' }
   }
 
@@ -471,6 +523,13 @@ export async function streamChat(options: {
     let changed = false
     if (detail.includes('stream_options') && includeUsage) {
       includeUsage = false
+      /*
+       * 光把开关关掉没用（T-11）：body 是 buildOpenAiBody({ includeUsage: true })
+       * 造出来的，本身就带 stream_options；上面拼 payload 时又是先 {...body} 展开、
+       * 再按开关补一次 —— 开关关了，旧字段照样被原封不动发出去。于是同一个 400
+       * 会重试满三次整段请求，兼容网关永远用不了。必须真的把这个字段删掉。
+       */
+      delete body.stream_options
       changed = true
     }
     if (detail.includes('reasoning_effort') || detail.includes('thinking')) {
@@ -481,8 +540,13 @@ export async function streamChat(options: {
       }
     }
     if (detail.includes('reasoning_content')) {
-      messages = stripReasoning(messages)
-      changed = true
+      // 只有真的剥掉了东西才算「改过」（T-11）。以前无条件置 changed：
+      // 历史里根本没有 reasoning_content 时也会重发一次一模一样的请求，白等一轮。
+      const hadReasoning = messages.some((message) => message.reasoning_content !== undefined)
+      if (hadReasoning) {
+        messages = stripReasoning(messages)
+        changed = true
+      }
     }
     if (detail.includes('max_tokens') || detail.includes('budget_tokens')) {
       // 抬高的上限被中转站拒了：退回「正文预算」，用协议层重新拼一次请求体。
@@ -495,6 +559,15 @@ export async function streamChat(options: {
       }
     }
     if (!changed) throw new ApiError(400, detail)
+    /*
+     * 这里**故意**没有「非 OpenAI 就 body = buildBody(sentLimit) 重建」那一步。
+     *
+     * 直觉上非 OpenAI 的 payload 直接就是 body，messages 是构造时烘进去的，改了
+     * messages 不重建等于没改。但协议层（toAnthropicMessages / toGoogleContents）
+     * 是从 text / images / tool_calls **重新拼**消息的，压根不会带 reasoning_content
+     * 出去 —— 所以那两个协议下这个分支本来就不会改变请求体，重建一次只会让代码
+     * 看起来像修好了。真要给非 OpenAI 剥字段，得改协议层的转换，不属于本轮范围。
+     */
   }
   throw new ApiError(400, '请求被拒绝：按兼容性退避重试后仍然返回 400')
 }

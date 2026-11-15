@@ -1,6 +1,8 @@
 package com.elyoncat.deepsea;
 
 import android.app.DownloadManager;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Color;
@@ -8,11 +10,13 @@ import android.graphics.Typeface;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Environment;
+import android.view.ActionMode;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.webkit.CookieManager;
 import android.webkit.DownloadListener;
+import android.webkit.JavascriptInterface;
 import android.webkit.URLUtil;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
@@ -43,6 +47,25 @@ public class WebChatActivity extends AppCompatActivity {
 
     private int dp(int value) {
         return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    /**
+     * 网页版窗口同样压掉「浮动文本选择工具条」，只处理 TYPE_FLOATING，其余交还系统。
+     *
+     * 之前这里保留系统工具条，指望「主题是固定深色，工具条就不会白」——真机证明这个假设
+     * 不成立：本机 ROM 的 FloatingActionMode 仍会短暂闪一块白板，并且拖动选择手柄时
+     * 手柄 PopupWindow 也会闪白。统一改由 {@link SelectionMenuSuppressor} 返回不画 UI 的
+     * ActionMode，选区与手柄照常可用。复制网页文字可继续用站点自带的「复制」按钮。
+     */
+    @Override
+    public ActionMode onWindowStartingActionMode(ActionMode.Callback callback, int type) {
+        if (type == ActionMode.TYPE_FLOATING && callback != null && getWindow() != null) {
+            View anchor = getWindow().getDecorView();
+            if (anchor != null) {
+                return SelectionMenuSuppressor.noOp(anchor, callback);
+            }
+        }
+        return super.onWindowStartingActionMode(callback, type);
     }
 
     @Override
@@ -103,6 +126,10 @@ public class WebChatActivity extends AppCompatActivity {
         // （主题是固定深色，工具条不会再是白底）。网页版里长按文字能正常复制/粘贴。
         webView = new DeepSeaWebView(this);
         webView.setBackgroundColor(Color.parseColor("#061821"));
+        // 原生剪贴板桥：网页版是独立 WebView（没有 Capacitor 桥），站点「分享→复制链接」
+        // 走 navigator.clipboard / execCommand('copy')，在 WebView 91 上会 reject → 站点提示
+        // 「复制失败」。暴露一个最小对象给注入的 shim（见 CLIPBOARD_SHIM），把复制落到原生。
+        webView.addJavascriptInterface(new ClipboardBridge(), "DeepSeaClipboard");
         WebSettings settings = webView.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
@@ -187,6 +214,68 @@ public class WebChatActivity extends AppCompatActivity {
         webView.loadUrl(startUrl);
     }
 
+    /**
+     * 注入站点的剪贴板 shim。
+     *
+     * Android WebView 上 navigator.clipboard.writeText 常常直接 reject（没有剪贴板权限、
+     * 或非安全上下文判定），站点「分享→复制链接」就会走到 catch 里提示「复制失败」。
+     * 这里把 writeText / readText 以及 document.execCommand('copy'/'cut') 都改接到
+     * 原生 {@link ClipboardBridge}，复制必然成功。
+     */
+    private static final String CLIPBOARD_SHIM =
+        "(function(){"
+            + "try{"
+            + "if(window.__deepseaClipShim){return;}window.__deepseaClipShim=1;"
+            + "var B=window.DeepSeaClipboard;"
+            + "function _copy(t){try{if(B&&B.copy){B.copy(String(t==null?'':t));}}catch(e){}}"
+            + "function _read(){try{return B&&B.read?String(B.read()):'';}catch(e){return '';}}"
+            + "var _clip={writeText:function(t){_copy(t);return Promise.resolve();},"
+            + "readText:function(){return Promise.resolve(_read());}};"
+            + "try{Object.defineProperty(navigator,'clipboard',{configurable:true,get:function(){return _clip;}});}"
+            + "catch(e){try{navigator.clipboard=_clip;}catch(e2){}}"
+            + "try{if(navigator.clipboard){navigator.clipboard.writeText=_clip.writeText;navigator.clipboard.readText=_clip.readText;}}catch(e){}"
+            + "var _oe=document.execCommand?document.execCommand.bind(document):null;"
+            + "document.execCommand=function(c,u,v){"
+            + "if(c==='copy'||c==='cut'){try{var s='';var sel=window.getSelection?String(window.getSelection()):'';"
+            + "if(sel){s=sel;}else{var a=document.activeElement;"
+            + "if(a&&(a.tagName==='TEXTAREA'||a.tagName==='INPUT')&&typeof a.selectionStart==='number'){"
+            + "s=String(a.value).substring(a.selectionStart,a.selectionEnd);}}"
+            + "if(s){_copy(s);return true;}}catch(e){}}"
+            + "return _oe?_oe(c,u,v):false;};"
+            + "}catch(e){}"
+            + "})();";
+
+    /** 暴露给网页版 WebView 的原生剪贴板（由 CLIPBOARD_SHIM 调用）。 */
+    public class ClipboardBridge {
+        @JavascriptInterface
+        public void copy(String text) {
+            try {
+                ClipboardManager manager = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                if (manager != null) {
+                    manager.setPrimaryClip(ClipData.newPlainText("text", text == null ? "" : text));
+                }
+            } catch (Exception ignored) {
+                // 剪贴板不可用时静默失败，不影响页面其它逻辑。
+            }
+        }
+
+        @JavascriptInterface
+        public String read() {
+            try {
+                ClipboardManager manager = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                if (manager != null && manager.hasPrimaryClip()
+                        && manager.getPrimaryClip() != null
+                        && manager.getPrimaryClip().getItemCount() > 0) {
+                    CharSequence text = manager.getPrimaryClip().getItemAt(0).coerceToText(WebChatActivity.this);
+                    return text == null ? "" : text.toString();
+                }
+            } catch (Exception ignored) {
+                // 忽略
+            }
+            return "";
+        }
+    }
+
     private TextView barButton(String text, Runnable action) {
         TextView view = new TextView(this);
         view.setText(text);
@@ -212,6 +301,9 @@ public class WebChatActivity extends AppCompatActivity {
 
     private void injectSkin() {
         if (webView == null) return;
+        // 先装剪贴板 shim：把站点的 navigator.clipboard.writeText / execCommand('copy')
+        // 路由到原生剪贴板，避免 WebView 上「复制失败」。
+        webView.evaluateJavascript(CLIPBOARD_SHIM, null);
         String style = "(function(){var id='deepsea-theme';var s=document.getElementById(id);"
             + "if(!s){s=document.createElement('style');s.id=id;(document.head||document.documentElement).appendChild(s);}"
             + "s.textContent=" + JSONObject.quote(css) + ";})();";

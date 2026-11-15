@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 全透明 drawable：给系统弹窗（尤其文本选择手柄的 PopupWindow）当 popupBackground 用。
+     用 drawable 而不是 @android:color/transparent，是因为 PopupWindow 读的是 Drawable，
+     个别 ROM 对颜色资源转换不彻底，仍会退回主题默认的浅色 9-patch（就是白底来源）。 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="@android:color/transparent" />
+</shape>

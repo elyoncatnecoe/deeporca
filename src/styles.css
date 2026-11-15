@@ -122,21 +122,21 @@ button:disabled {
 .stage-wrap {
   position: fixed;
   inset: 0;
-  z-index: 0;
+  z-index: var(--z-base);
   background: linear-gradient(180deg, #0a3341 0%, #04141d 75%);
 }
 
 .stage {
   position: fixed;
   inset: 0;
-  z-index: 0;
+  z-index: var(--z-base);
 }
 
 .stage-wrap::after {
   content: "";
   position: fixed;
   inset: 0;
-  z-index: 1;
+  z-index: var(--z-1);
   pointer-events: none;
   background:
     linear-gradient(180deg, rgba(2, 10, 15, 0.52) 0%, transparent 22%, transparent 62%, rgba(2, 10, 15, 0.72) 100%),
@@ -165,7 +165,7 @@ button:disabled {
  */
 .stage .orca-thought {
   position: fixed;
-  z-index: 10003;
+  z-index: var(--z-stage-speech);
   max-width: 240px;
   padding: 8px 13px;
   border: 1px solid var(--line-strong);
@@ -202,7 +202,7 @@ button:disabled {
 .stage-fallback {
   position: absolute;
   inset: 0;
-  z-index: 2;
+  z-index: var(--z-2);
   display: grid;
   place-content: center;
   justify-items: center;
@@ -238,7 +238,7 @@ button:disabled {
   position: fixed;
   left: 0;
   top: 0;
-  z-index: 2;
+  z-index: var(--z-2);
   width: 0;
   height: 0;
   pointer-events: none;
@@ -437,7 +437,7 @@ button:disabled {
 .ui {
   position: fixed;
   inset: 0;
-  z-index: 10;
+  z-index: var(--z-ui);
   pointer-events: none;
 }
 
@@ -786,7 +786,7 @@ button:disabled {
 .chat-backdrop {
   position: absolute;
   inset: 0;
-  z-index: -1;
+  z-index: var(--z-behind);
   background-position: center;
   background-size: cover;
   background-repeat: no-repeat;
@@ -845,7 +845,7 @@ button:disabled {
   width: 10px;
   cursor: ew-resize;
   touch-action: none;
-  z-index: 8;
+  z-index: var(--z-8);
 }
 
 .sheet-resize[data-edge='left'] { left: -3px; }
@@ -1482,7 +1482,7 @@ button:disabled {
   bottom: 120px;
   display: flex;
   align-items: center;
-  z-index: 6;
+  z-index: var(--z-6);
   pointer-events: none;
 }
 
@@ -1998,7 +1998,7 @@ button:disabled {
 .media-viewer {
   position: fixed;
   inset: 0;
-  z-index: 130;
+  z-index: var(--z-viewer);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -2136,7 +2136,7 @@ button:disabled {
   position: absolute;
   inset: 6px 12px calc(10px + var(--safe-bottom, 0px));
   inset: 6px 12px calc(10px + min(var(--safe-bottom, 0px), 72px));
-  z-index: 2;
+  z-index: var(--z-2);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2312,7 +2312,7 @@ button:disabled {
   position: absolute;
   left: 0;
   bottom: calc(100% + 8px);
-  z-index: 6;
+  z-index: var(--z-6);
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -2394,7 +2394,7 @@ button:disabled {
   position: absolute;
   right: 0;
   bottom: calc(100% + 8px);
-  z-index: 7;
+  z-index: var(--z-7);
   display: flex;
   flex-direction: column;
   gap: 1px;
@@ -2842,9 +2842,23 @@ button:disabled {
   min-height: 0;
   overflow-y: auto;
   padding: 16px;
-  /* 键盘弹起时只影响「滚动定位」，让聚焦的输入框自动滚到键盘上方；
-     不影响这个固定容器的尺寸，所以不会把布局压塌。 */
-  scroll-padding-bottom: calc(12px + var(--ime-inset, 0px));
+  /*
+   * 只留一点点余量，**不要**再把 --ime-inset 加进来。
+   *
+   * targetSdk 35 强制 edge-to-edge 之后，键盘弹起时窗口不再变矮，WebView 默认
+   * （interactive-widget=resizes-visual）只缩小「视觉视口」并把它整体上移，而
+   * .screen 是 position: fixed —— 固定定位元素不跟着平移，于是：
+   *   · 点进输入框，页面看起来「弹到顶部」；
+   *   · 拖回去以后，光标和画面错位（视觉视口还在偏移状态）。
+   * index.html 里改成 interactive-widget=resizes-content 后，布局视口本身会缩，
+   * 固定容器跟着缩，浏览器在缩小的视口里把输入框滚到键盘上方 —— 正确行为。
+   *
+   * 注意：interactive-widget 是 Chrome 108 才加的（WebView 同理）。老 WebView
+   * （实测有 Android 12 机器停在 91.0.4472.114）会忽略这个 meta，那边真正的修复
+   * 就是**这一行**：以前 scroll-padding-bottom 里叠了一份键盘高度，滚动定位把输入框
+   * 推到几乎贴顶 —— 用户看到的就是「弹到顶部」。所以这条 padding 不许再加回去。
+   */
+  scroll-padding-bottom: 12px;
 }
 
 .screen-footnote {
@@ -2954,11 +2968,19 @@ button:disabled {
 }
 
 .switch {
+  /* C3：尺寸收敛成变量，knob 位移用 calc 由变量算出来（不再是写死的 translateX(18px)）。
+     这样以后只改 --sw-w 就能整体变宽，knob 会自动走到右侧，不会和轨道脱节。
+     取值保持 42×24 / knob16 / 边距3 / 边框1，与改造前观感完全一致。 */
+  --sw-w: 42px;
+  --sw-h: 24px;
+  --sw-knob: 16px;
+  --sw-pad: 3px;
+  --sw-border: 1px;
   position: relative;
-  width: 42px;
-  height: 24px;
+  width: var(--sw-w);
+  height: var(--sw-h);
   flex: none;
-  border: 1px solid var(--line);
+  border: var(--sw-border) solid var(--line);
   border-radius: 999px;
   background: rgba(147, 183, 192, 0.16);
   transition: background 160ms ease, border-color 160ms ease;
@@ -2966,10 +2988,10 @@ button:disabled {
 
 .switch span {
   position: absolute;
-  top: 3px;
-  left: 3px;
-  width: 16px;
-  height: 16px;
+  top: var(--sw-pad);
+  left: var(--sw-pad);
+  width: var(--sw-knob);
+  height: var(--sw-knob);
   border-radius: 50%;
   background: #d8eef0;
   transition: transform 160ms ease;
@@ -2981,7 +3003,9 @@ button:disabled {
 }
 
 .switch.is-on span {
-  transform: translateX(18px);
+  /* 轨道右侧对称留 --sw-pad；border-box 下再减两侧边框 = 2×--sw-border。
+     16px 基准时 = 42-16-6-2 = 18px（与原值一致）。 */
+  transform: translateX(calc(var(--sw-w) - var(--sw-knob) - var(--sw-pad) * 2 - var(--sw-border) * 2));
   background: #04211f;
 }
 
@@ -3777,7 +3801,7 @@ button:disabled {
 .onboarding {
   position: fixed;
   inset: 0;
-  z-index: 40;
+  z-index: var(--z-40);
   display: grid;
   place-items: center;
   padding: calc(20px + var(--safe-top)) 16px calc(20px + var(--safe-bottom, 0px));
@@ -3973,7 +3997,7 @@ button:disabled {
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 100;
+  z-index: var(--z-modal);
   display: grid;
   place-items: center;
   padding: 16px;
@@ -4037,7 +4061,9 @@ button:disabled {
 
 .run-frame {
   width: 100%;
-  height: 55vh;
+  /* 之前是纯 55vh：安卓 WebView 的 vh 会把系统栏算进去，个别短屏上会偏高。
+     这里给上下界收口（短屏不至于顶出、长屏不至于过高），不再依赖精确 vh。 */
+  height: clamp(240px, 55vh, 460px);
   border: 1px solid var(--line);
   border-radius: 12px;
   background: #ffffff;
@@ -4071,7 +4097,7 @@ button:disabled {
 .drawer-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 50;
+  z-index: var(--z-drawer);
   background: rgba(2, 10, 15, 0.5);
   backdrop-filter: blur(4px);
   pointer-events: auto;
@@ -4116,6 +4142,13 @@ button:disabled {
 .drawer-head-actions {
   display: flex;
   gap: 2px;
+}
+
+/* 助手筛选：用自绘的 Select（src/components/ui.tsx），它的 .select-wrap 已是
+ * width:100% 且沿用 .field 的深色变量。这里只补一层外边距，避免贴边。
+ * 刻意不再用原生 <select>：安卓 WebView 的原生弹层不吃 color-scheme，会白屏。 */
+.drawer-filter {
+  padding: 8px 8px 0;
 }
 
 .drawer-list {
@@ -4325,7 +4358,7 @@ button:disabled {
   bottom: calc(96px + var(--safe-bottom, 0px));
   bottom: calc(96px + min(var(--safe-bottom, 0px), 72px));
   transform: translateX(-50%);
-  z-index: 200;
+  z-index: var(--z-toast);
   max-width: min(90vw, 520px);
   padding: 9px 14px;
   border: 1px solid var(--line-strong);
@@ -4754,7 +4787,7 @@ button:disabled {
   flex-direction: column;
   justify-content: center;
   gap: 8px;
-  z-index: 6;
+  z-index: var(--z-6);
   pointer-events: auto;
 }
 
@@ -4815,7 +4848,7 @@ button:disabled {
   top: 64px;
   left: 12px;
   right: 12px;
-  z-index: 20;
+  z-index: var(--z-search);
   max-height: 60%;
   display: flex;
   flex-direction: column;
@@ -5200,7 +5233,7 @@ button:disabled {
 /* 面板本体：位置/宽度由 JS 内联写入。 */
 .select-panel {
   position: fixed;
-  z-index: 60;
+  z-index: var(--z-popover);
   display: flex;
   flex-direction: column;
   /* 上限 320px：位置合适时组件会内联覆盖成更小的值（贴着视口边缘时收窄），
@@ -5469,7 +5502,7 @@ textarea,
 .selection-copy {
   position: fixed;
   /* 高于 modal-backdrop(100)，低于 toast(200)：弹窗里的输入框也能看到工具条 */
-  z-index: 120;
+  z-index: var(--z-selection);
   display: flex;
   align-items: stretch;
   gap: 0;
@@ -5535,6 +5568,39 @@ textarea,
   background: linear-gradient(135deg, #ff9b9b, #ff6f6f);
   color: #2a0707;
 }
+
+/*
+ * 危险操作按钮（记忆页「覆盖导入」「继续覆盖导入」）。
+ *
+ * 这两个按钮只写了 className="danger-button"，而 CSS 里从来没有这条规则，
+ * 于是它们退回浏览器默认按钮：`button { font: inherit }` 让字号跟住父级（不是 12px），
+ * 字重是默认的 400，内边距和圆角也和旁边的「添加导入」对不上 —— 摆在一起明显不是一套。
+ * 这里把排版完全对齐 .primary-button，只把配色换成危险色。
+ * 新加表单组件时务必同步写样式，test/css-class-audit.test.ts 会盯着。
+ */
+.danger-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border-radius: 11px;
+  font-size: 12px;
+  font-weight: 650;
+  padding: 8px 14px;
+  border: 1px solid rgba(255, 123, 123, 0.45);
+  background: linear-gradient(135deg, #ff9b9b, #ff6f6f);
+  color: #2a0707;
+}
+
+.danger-button:hover:not(:disabled) {
+  border-color: rgba(255, 123, 123, 0.7);
+  background: linear-gradient(135deg, #ffb0b0, #ff8686);
+}
+
+.danger-button:disabled {
+  opacity: 0.45;
+  filter: saturate(0.6);
+}
 /* ------------------------------------------------------- 启动失败提示 */
 
 /*
@@ -5544,7 +5610,7 @@ textarea,
 .boot-error {
   position: fixed;
   /* 高于弹窗(100)与选区复制条(120)，低于 toast(200)。 */
-  z-index: 150;
+  z-index: var(--z-critical);
   top: calc(10px + var(--safe-top, 0px));
   left: 50%;
   transform: translateX(-50%);
@@ -6034,7 +6100,7 @@ textarea,
   background: var(--glass-strong);
   box-shadow: var(--shadow);
   backdrop-filter: blur(18px);
-  z-index: 12;
+  z-index: var(--z-12);
 }
 
 .selection-bar-btn {
@@ -6143,7 +6209,7 @@ body:has(.modal-backdrop) .selection-copy {
 .room-screen {
   position: fixed;
   inset: 0;
-  z-index: 3;
+  z-index: var(--z-3);
   display: flex;
   flex-direction: column;
   justify-content: space-between;
@@ -6618,6 +6684,17 @@ body:has(.modal-backdrop) .selection-copy {
   background: #0a2632;
 }
 
+/*
+ * 拍糊了的照片（PhotoAlbum 在 photo.blurry 时挂上 .is-blurry）。
+ *
+ * 这个类以前没有任何规则 —— 等于「标记了但看不出来」，而且因为旧守卫把
+ * `${…}` 里的字符串整个丢掉，一直没被发现。补强守卫后才暴露出来，顺手补上。
+ * 只做「看得出来是糊的」，不改布局。
+ */
+.album-item.is-blurry img {
+  filter: blur(3px) saturate(0.85);
+}
+
 .album-item figcaption {
   display: flex;
   align-items: center;
@@ -6703,7 +6780,7 @@ body:has(.modal-backdrop) .selection-copy {
 .photo-viewer {
   position: fixed;
   inset: 0;
-  z-index: 120;
+  z-index: var(--z-selection);
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -6717,7 +6794,7 @@ body:has(.modal-backdrop) .selection-copy {
   position: absolute;
   top: calc(10px + var(--safe-top));
   right: calc(12px + var(--safe-right));
-  z-index: 2;
+  z-index: var(--z-2);
   width: 36px;
   height: 36px;
   padding: 0;
@@ -6872,7 +6949,7 @@ body:has(.modal-backdrop) .selection-copy {
   position: fixed;
   right: calc(14px + var(--safe-right));
   bottom: calc(16px + var(--safe-bottom));
-  z-index: 40;
+  z-index: var(--z-40);
   display: grid;
   place-items: center;
   width: 32px;
@@ -6920,4 +6997,72 @@ body:has(.modal-backdrop) .selection-copy {
     margin-right: 562px;
     margin-left: 22px;
   }
+}
+
+/* ------------------------------------------------- 键盘导航焦点可见（B3） */
+/*
+ * 一批输入控件把 outline 关掉了（.composer textarea / .field input/select/textarea /
+ * .search-field input / .search-head input / .bubble-edit textarea / .quick-editor-row input 等）。
+ * 触屏看不出问题，但桌面（Electron）/外接键盘用户会「找不到焦点」。
+ *
+ * 只在「精确指针」（鼠标 / 触控板 / 键盘环境）下补一圈可见焦点环；触屏（pointer: coarse）
+ * 保持原样，避免手机上点一下输入框就冒一圈描边。用 outline 而不是 box-shadow，
+ * 不影响布局，也不会和既有的 :focus 边框样式打架。
+ */
+@media (pointer: fine) {
+  input:focus-visible,
+  textarea:focus-visible,
+  select:focus-visible,
+  [contenteditable='true']:focus-visible {
+    outline: 2px solid var(--aqua);
+    outline-offset: 2px;
+  }
+}
+
+/* ------------------------------------------------- backdrop-filter 兜底（A2） */
+/*
+ * 一、内核完全不支持 backdrop-filter（含 -webkit- 前缀）时，全站关掉模糊，
+ * 避免「整块不绘制 → 黑屏 / 露出半透明白底」。支持的内核（含本机 WebView 91）不受影响。
+ * 各大面板（.screen / .chat-sheet / .select-panel / quick-commands）另有实色底兜底，叠加双保险。
+ * 二、注意这里**不**用 (pointer: coarse) 全局关模糊：那会连带把手机上的玻璃质感也拿掉，
+ * 属于观感取舍，不能擅自改；只在「不支持」时兜底。
+ */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  * {
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+  }
+}
+
+
+/* ------------------------------------------------- z-index 统一标尺（A3） */
+/*
+ * 全仓库浮层只从这里取值，别再写裸数字。下面的数值与迁移前**一一对应**（等价替换），
+ * 所以本次不改任何层叠关系，只是把它们集中到一处，方便以后加浮层/调层级。
+ * 新增浮层：从下往上挑槽位。
+ * 注意：3D/orca 那一套（styles.ts 注入）是独立高位段 9998–10010，另有 main.tsx 的 99999
+ * 调试层与非菜单 pet 宿主 2147483647，它们不在本标尺内，改动要单独评估。
+ */
+:root {
+  --z-behind: -1;
+  --z-base: 0;
+  --z-1: 1;
+  --z-2: 2;
+  --z-3: 3;
+  --z-6: 6;
+  --z-7: 7;
+  --z-8: 8;
+  --z-ui: 10;
+  --z-12: 12;
+  --z-search: 20;
+  --z-40: 40;
+  --z-drawer: 50;
+  --z-popover: 60;
+  --z-modal: 100;
+  --z-selection: 120;
+  --z-viewer: 130;
+  --z-critical: 150;
+  --z-toast: 200;
+  --z-stage-speech: 10003;
+  --z-pet: 2147483647;
 }
