@@ -1,7 +1,7 @@
-# 每次 push / PR 都跑一遍测试。
+# 每次 push / PR 都跑一遍：类型检查 + 全量测试 + Android Java 编译。
 #
-# 只做两件事：类型检查 + 全量测试。不打包、不发版 —— 打包依赖 Android SDK 与
-# Windows 签名，放在本地脚本里（scripts/build-android.mjs / build-exe.mjs）。
+# 不打包、不发版 —— 签名 APK 依赖 keystore 与 Windows 工具链，放在本地脚本里
+# （scripts/build-android.mjs / build-exe.mjs）。android job 只到 javac 为止。
 #
 # 为什么是 Node 24：测试直接跑 .ts（node --test 走内置类型剥离），
 # 本地开发用的是 v24，CI 保持一致，免得两边对「能不能直接跑 .ts」判断不同。
@@ -37,3 +37,63 @@ jobs:
 
       - name: Test
         run: node --test "test/**/*.test.ts"
+
+  # 原生接缝（ActionMode 重写、插件、Manifest、Java 语法）TypeScript 与 node 测试
+  # 完全看不见：selection-handle-guard 那类只是源码断言，连「能不能编过」都不保证。
+  #
+  # 这里只编 Java、不出 APK —— 目标是把「android/ 下改成编不过」挡在 main 之外，
+  # 真机验收和签名打包仍然只能在本地做。
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Capacitor 的 :capacitor-android / :capacitor-cordova-android-plugins 是从
+      # node_modules 里 include 的，没有依赖连 Gradle 的配置阶段都过不去。
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      # gradle-wrapper.properties 的 distributionUrl 指向本机离线 zip
+      # （file\:///F:/...，0.1.0 基线起就这样），Linux runner 上取不到。
+      # 这里换成官方分发地址，版本号仍从原文件里取，不另抄一份。
+      - name: Point the Gradle wrapper at the public distribution
+        run: |
+          WRAPPER=android/gradle/wrapper/gradle-wrapper.properties
+          sed -i 's/\r$//' "$WRAPPER"
+          sed -i -E \
+            's#^distributionUrl=.*(gradle-[0-9.]+-bin\.zip)$#distributionUrl=https\\://services.gradle.org/distributions/\1#' \
+            "$WRAPPER"
+          grep distributionUrl "$WRAPPER"
+          grep -q '^distributionUrl=https' "$WRAPPER" || {
+            echo "gradle-wrapper.properties 还指着本机 file: 路径，没换成官方地址" >&2
+            exit 1
+          }
+
+      # gradlew 提交时是 100644，Linux 上直接执行会 Permission denied。
+      - name: Make gradlew executable
+        run: chmod +x android/gradlew
+
+      - name: Accept Android SDK licenses
+        run: |
+          SDKMANAGER="${ANDROID_HOME:-/usr/local/lib/android/sdk}/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses > /dev/null
+
+      - name: Compile Android Java
+        working-directory: android
+        run: ./gradlew :app:compileDebugJavaWithJavac --no-daemon --stacktrace
