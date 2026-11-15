@@ -35,6 +35,7 @@ export default function App() {
   const appTone = useAppStore((state) => state.settings.appTone)
   const customAccent = useAppStore((state) => state.settings.customAccent)
   const customBubble = useAppStore((state) => state.settings.customBubble)
+  const customBase = useAppStore((state) => state.settings.customBase)
   const quality = useAppStore((state) => state.settings.quality)
   const zen = useAppStore((state) => state.zen)
 
@@ -76,7 +77,7 @@ export default function App() {
       data-tone={appTone}
       data-screen={screen}
       data-zen={zen ? 'true' : 'false'}
-      style={appearanceStyle(customAccent, customBubble)}
+      style={appearanceStyle(customAccent, customBubble, customBase)}
     >
       {screen !== 'onboarding' && <Stage key={quality} />}
       {bootError !== '' && (

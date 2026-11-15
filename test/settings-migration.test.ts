@@ -157,12 +157,16 @@ test('外观自定义：颜色只认 #rrggbb，脏值退回「没有自定义」
   assert.equal(sanitizeRaw({ customAccent: '#12345' }).customAccent, null)
   assert.equal(sanitizeRaw({ customAccent: '#fff; background: url(x)' }).customAccent, null, '不能把任意 CSS 放进内联变量')
   assert.equal(sanitizeRaw({ customBubble: 42 }).customBubble, null, '非字符串当没给')
+  assert.equal(sanitizeRaw({ customBase: '#EEF4F7' }).customBase, '#eef4f7', '底色同样统一小写')
+  assert.equal(sanitizeRaw({ customBase: '#abc' }).customBase, '#aabbcc', '三位简写也要展开')
+  assert.equal(sanitizeRaw({ customBase: 'url(x)' }).customBase, null, '底色只能是一个 hex，不能塞 CSS')
 })
 
 test('外观自定义：默认是「跟随预设」，不是布尔式的默认开', () => {
   const settings = sanitizeRaw({})
   assert.equal(settings.customAccent, null)
   assert.equal(settings.customBubble, null)
+  assert.equal(settings.customBase, null)
   assert.equal(settings.chatBackdrop, null)
   assert.equal(settings.chatBackdropOpacity, 0.7)
 })

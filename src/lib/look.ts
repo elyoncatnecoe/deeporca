@@ -1,4 +1,4 @@
-﻿import type { QualityId, ThemeId } from './types'
+import type { QualityId, ThemeId } from './types'
 
 export interface ToneOption {
   id: ThemeId
@@ -14,9 +14,9 @@ export interface ToneOption {
  * 没有新增配色 —— 就是原本那三套，只是现在能自由组合。
  */
 export const APP_TONES: ToneOption[] = [
-  { id: 'deep', name: '深海', hint: '默认的蓝黑' },
-  { id: 'iceberg', name: '雾霭', hint: '冷白冰川' },
-  { id: 'tropical', name: '暖阳', hint: '蜜桃珊瑚' },
+  { id: 'deep', name: '深海', hint: '深蓝黑（默认）' },
+  { id: 'iceberg', name: '雾霭', hint: '冷白浅色' },
+  { id: 'tropical', name: '暖阳', hint: '奶油暖白' },
 ]
 
 /**

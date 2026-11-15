@@ -484,6 +484,13 @@ export interface Settings {
   /** 自定义用户气泡主色（`#rrggbb`）。null = 跟随界面色调预设。 */
   customBubble: string | null
   /**
+   * 自定义页面底色（`#rrggbb`）。null = 跟随界面色调预设。
+   *
+   * 以前「界面色调」只换得动强调色和气泡，页面底色写死在深海那一套。有了这个
+   * 字段后，底色（连同由它派生出的面板明暗、文字深浅）也能被单独指定。
+   */
+  customBase: string | null
+  /**
    * 对话区自定义底图（压缩后的 dataURL）。null = 没有底图。
    *
    * 为什么不进 localStorage：一张 1600px 的 JPEG 就有几百 KB，WebView 的
@@ -730,6 +737,7 @@ export const DEFAULT_SETTINGS: Settings = {
   // 新外观能力默认「不自定义」：颜色跟预设走，底图为空。
   customAccent: null,
   customBubble: null,
+  customBase: null,
   chatBackdrop: null,
   chatBackdropOpacity: 0.7,
   quality: 'auto',

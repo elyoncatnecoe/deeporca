@@ -273,6 +273,7 @@ export function sanitize(raw: Partial<Settings>): Settings {
   // 「默认开」—— 没自定义时界面必须完全跟着 data-tone 预设走。
   settings.customAccent = normalizeHexColor(settings.customAccent)
   settings.customBubble = normalizeHexColor(settings.customBubble)
+  settings.customBase = normalizeHexColor(settings.customBase)
   settings.chatBackdrop = normalizeChatBackdrop(settings.chatBackdrop)
   settings.chatBackdropOpacity = clampNumber(settings.chatBackdropOpacity, 0, 1, DEFAULT_SETTINGS.chatBackdropOpacity)
   if (!QUALITIES.includes(settings.quality)) settings.quality = 'auto'

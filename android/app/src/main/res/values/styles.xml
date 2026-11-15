@@ -19,6 +19,10 @@
         <item name="android:statusBarColor">#04141d</item>
         <item name="android:navigationBarColor">#04141d</item>
         <item name="android:windowLightStatusBar">false</item>
+        <!-- Android 10+ 的强制深色（Force Dark）会替 WebView 再反转一遍颜色，
+             某些 ROM 上表现为「插入光标底部 / 选择手柄出现白块」。网页侧本来就是
+             完整的深/浅两套配色，不需要系统替它反色，这里关掉。 -->
+        <item name="android:forceDarkAllowed">false</item>
         <!--
           系统弹层（文本选择工具条、上下文菜单、自动填充下拉）的底色与文字色。
 
@@ -75,6 +79,12 @@
         <item name="android:backgroundDimEnabled">false</item>
         <item name="android:colorBackground">@android:color/transparent</item>
         <item name="android:popupBackground">@drawable/ds_transparent</item>
+        <!-- 窗口内容层再兜一层：有的 ROM 会在 content 层铺默认底色，
+             手柄/光标底部那圈白就来自这里。 -->
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowFrame">@null</item>
+        <item name="android:background">@android:color/transparent</item>
+        <item name="android:forceDarkAllowed">false</item>
     </style>
 
     <style name="AppTheme.NoActionBar" parent="Theme.AppCompat.NoActionBar">
@@ -84,6 +94,8 @@
         <item name="android:statusBarColor">#04141d</item>
         <item name="android:navigationBarColor">#04141d</item>
         <item name="android:windowLightStatusBar">false</item>
+        <!-- 同 AppTheme：关掉强制反色，避免光标/手柄被系统反转出白块。 -->
+        <item name="android:forceDarkAllowed">false</item>
         <!-- 同 AppTheme：把系统弹层钉成深色，避免长按时出现白色面板。 -->
         <item name="colorBackgroundFloating">#0b1b24</item>
         <item name="android:colorBackgroundFloating">#0b1b24</item>

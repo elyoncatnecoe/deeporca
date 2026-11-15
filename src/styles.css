@@ -1,8 +1,21 @@
 :root {
+  /*
+   * 底色阶（surface scale）。整套 UI 的玻璃面板 / 卡片 / 蒙层以前写死了
+   * rgba(8,31,42,x) 这类深海色，于是「界面色调」只能改气泡、改不了底色。
+   * 现在把这些颜色抽成三个 RGB 三元组，只有这里（和下面 [data-tone] 块）
+   * 决定明暗，各处只保留自己的透明度：
+   *   --surface-rgb   面板/玻璃底（最浅的一档）
+   *   --surface-2-rgb 更实的卡片、抽屉、弹层
+   *   --deep-rgb      最深的压暗层（遮罩、渐变尾部）
+   * 深海（deep）= 原值，视觉与改动前完全一致。
+   */
+  --surface-rgb: 8, 31, 42;
+  --surface-2-rgb: 5, 22, 31;
+  --deep-rgb: 2, 10, 15;
   --bg: #04141d;
   --bg-2: #082530;
-  --glass: rgba(8, 31, 42, 0.72);
-  --glass-strong: rgba(5, 22, 31, 0.9);
+  --glass: rgba(var(--surface-rgb), 0.72);
+  --glass-strong: rgba(var(--surface-2-rgb), 0.9);
   --line: rgba(127, 227, 212, 0.14);
   --line-strong: rgba(127, 227, 212, 0.28);
   --text: #e8f7f9;
@@ -46,27 +59,47 @@
  * 深海（deep）直接用 :root 里的默认值。
  */
 .app[data-tone='iceberg'] {
-  --accent: #9fd8ea;
-  --accent-2: #7fbfd8;
-  --aqua: #9fd8ea;
+  /* 浅色配置：面板/卡片走冷白，文字随之转深，否则深字浅字都会看不清。 */
+  --surface-rgb: 233, 242, 246;
+  --surface-2-rgb: 214, 230, 237;
+  --deep-rgb: 196, 216, 226;
+  --bg: #eef4f7;
+  --bg-2: #dbe8ef;
+  --text: #12333d;
+  --dim: #41646f;
+  --faint: #6d8d97;
+  --accent: #2f8ea6;
+  --accent-2: #27768a;
+  --aqua: #3a8a9c;
   --bubble-user-from: #a9d6e5;
   --bubble-user-to: #7fb2c9;
   --bubble-user-ink: #0e2f3a;
   --bubble-user-ink-soft: rgba(14, 47, 58, 0.62);
   --bubble-user-ink-faint: rgba(14, 47, 58, 0.45);
   --bubble-user-shadow: rgba(127, 178, 201, 0.22);
+  color-scheme: light;
 }
 
 .app[data-tone='tropical'] {
-  --accent: #ffb27a;
-  --accent-2: #f2905f;
-  --aqua: #ffc79a;
+  /* 暖色配置：奶油蜜桃底，文字转深暖色。 */
+  --surface-rgb: 253, 244, 236;
+  --surface-2-rgb: 247, 230, 216;
+  --deep-rgb: 238, 212, 192;
+  --bg: #fdf6ef;
+  --bg-2: #f8e6d7;
+  --text: #3a1f14;
+  --dim: #7a5645;
+  --faint: #a17e6b;
+  --accent: #d9743e;
+  --accent-2: #c4632f;
+  --aqua: #c06a3a;
   --bubble-user-from: #ffcf9f;
   --bubble-user-to: #f5a97c;
   --bubble-user-ink: #3a1c0e;
   --bubble-user-ink-soft: rgba(58, 28, 14, 0.62);
   --bubble-user-ink-faint: rgba(58, 28, 14, 0.45);
   --bubble-user-shadow: rgba(245, 169, 124, 0.22);
+  color-scheme: light;
 }
 
 html,
@@ -92,6 +125,9 @@ body {
   overflow: hidden;
   background: var(--bg);
   color: var(--text);
+  /* 光标用强调色：Chromium/WebView 认这条，比只靠原生 textCursorDrawable 稳，
+     能避免「光标底部发白」（系统反色把光标画成白色）这类 ROM 差异。 */
+  caret-color: var(--accent);
   -webkit-tap-highlight-color: transparent;
 }
 
@@ -115,6 +151,10 @@ button:disabled {
   position: fixed;
   inset: 0;
   overflow: hidden;
+  /* 背景铺在 .app（而不是 body）：[data-tone] 的变量挂在 .app 上，body 是它的
+     父级，变量传不上去。放这里换色调才能真正改到「底色」。 */
+  background: var(--bg);
+  color: var(--text);
 }
 
 /* ------------------------------------------------------------- aquarium */
@@ -123,7 +163,7 @@ button:disabled {
   position: fixed;
   inset: 0;
   z-index: var(--z-base);
-  background: linear-gradient(180deg, #0a3341 0%, #04141d 75%);
+  background: linear-gradient(180deg, var(--bg-2) 0%, var(--bg) 75%);
 }
 
 .stage {
@@ -139,7 +179,7 @@ button:disabled {
   z-index: var(--z-1);
   pointer-events: none;
   background:
-    linear-gradient(180deg, rgba(2, 10, 15, 0.52) 0%, transparent 22%, transparent 62%, rgba(2, 10, 15, 0.72) 100%),
+    linear-gradient(180deg, rgba(var(--deep-rgb), 0.52) 0%, transparent 22%, transparent 62%, rgba(var(--deep-rgb), 0.72) 100%),
     radial-gradient(120% 90% at 50% 0%, transparent 55%, rgba(1, 8, 12, 0.35) 100%);
 }
 
@@ -473,7 +513,7 @@ button:disabled {
   align-items: center;
   justify-content: space-between;
   padding: calc(14px + var(--safe-top)) calc(18px + var(--safe-right)) 14px calc(18px + var(--safe-left));
-  background: linear-gradient(180deg, rgba(3, 15, 21, 0.72), transparent);
+  background: linear-gradient(180deg, rgba(var(--deep-rgb), 0.72), transparent);
 }
 
 .brand {
@@ -631,7 +671,7 @@ button:disabled {
   padding: 8px 12px;
   border: 1px solid var(--line);
   border-radius: 999px;
-  background: rgba(8, 31, 42, 0.55);
+  background: rgba(var(--surface-rgb), 0.55);
   color: var(--dim);
   font-size: 12px;
   backdrop-filter: blur(12px);
@@ -682,7 +722,7 @@ button:disabled {
   padding: 7px;
   border: 1px solid var(--line);
   border-radius: 22px;
-  background: rgba(6, 25, 34, 0.8);
+  background: rgba(var(--surface-2-rgb), 0.8);
   box-shadow: 0 18px 50px rgba(0, 0, 0, 0.42);
   backdrop-filter: blur(22px) saturate(130%);
 }
@@ -755,7 +795,7 @@ button:disabled {
  */
 @supports not (backdrop-filter: blur(1px)) {
   .chat-sheet {
-    background: rgba(5, 22, 31, 0.98);
+    background: rgba(var(--surface-2-rgb), 0.98);
   }
 }
 
@@ -806,10 +846,10 @@ button:disabled {
   inset: 0;
   background: linear-gradient(
     180deg,
-    rgba(3, 15, 21, 0.7) 0%,
-    rgba(3, 15, 21, 0.44) 30%,
-    rgba(3, 15, 21, 0.5) 70%,
-    rgba(3, 15, 21, 0.74) 100%
+    rgba(var(--deep-rgb), 0.7) 0%,
+    rgba(var(--deep-rgb), 0.44) 30%,
+    rgba(var(--deep-rgb), 0.5) 70%,
+    rgba(var(--deep-rgb), 0.74) 100%
   );
 }
 
@@ -1047,7 +1087,7 @@ button:disabled {
   padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: 13px;
-  background: rgba(8, 31, 42, 0.5);
+  background: rgba(var(--surface-rgb), 0.5);
   color: var(--dim);
   font-size: 12px;
   text-align: left;
@@ -1378,7 +1418,7 @@ button:disabled {
   padding: 12px 14px;
   border: 1px solid var(--line);
   border-radius: 12px;
-  background: rgba(8, 31, 42, 0.5);
+  background: rgba(var(--surface-rgb), 0.5);
   color: var(--text);
   text-align: left;
 }
@@ -1863,7 +1903,7 @@ button:disabled {
   width: min(100%, 460px);
   border: 1px solid var(--line);
   border-radius: 12px;
-  background: rgba(6, 24, 33, 0.6);
+  background: rgba(var(--surface-2-rgb), 0.6);
   overflow: hidden;
 }
 
@@ -1909,7 +1949,7 @@ button:disabled {
   width: min(100%, 460px);
   border: 1px solid var(--line);
   border-radius: 12px;
-  background: rgba(6, 24, 33, 0.6);
+  background: rgba(var(--surface-2-rgb), 0.6);
   overflow: hidden;
 }
 
@@ -1946,7 +1986,7 @@ button:disabled {
   padding: 0;
   border: 1px solid rgba(127, 227, 212, 0.15);
   border-radius: 8px;
-  background: rgba(4, 18, 25, 0.8);
+  background: rgba(var(--surface-2-rgb), 0.8);
   overflow: hidden;
   cursor: zoom-in;
 }
@@ -2019,7 +2059,7 @@ button:disabled {
   height: 36px;
   border: 1px solid var(--line);
   border-radius: 999px;
-  background: rgba(6, 24, 33, 0.8);
+  background: rgba(var(--surface-2-rgb), 0.8);
   color: var(--text);
   cursor: pointer;
 }
@@ -2063,7 +2103,7 @@ button:disabled {
   padding: 8px 14px;
   border: 1px solid var(--line);
   border-radius: 999px;
-  background: rgba(6, 24, 33, 0.82);
+  background: rgba(var(--surface-2-rgb), 0.82);
   color: var(--text);
   font-size: 12px;
   cursor: pointer;
@@ -2124,7 +2164,7 @@ button:disabled {
   padding: 8px 12px calc(12px + var(--safe-bottom, 0px));
   padding: 8px 12px calc(12px + min(var(--safe-bottom, 0px), 72px));
   border-top: 1px solid var(--line);
-  background: rgba(4, 18, 25, 0.55);
+  background: rgba(var(--surface-2-rgb), 0.55);
 }
 
 .composer-wrap[data-drop="true"] .composer {
@@ -2223,7 +2263,7 @@ button:disabled {
    * 同一类问题：整块不绘制 / 黑屏）。换成接近不透明的实色，观感几乎一样但滚动顺得多。
    */
   .chat-sheet {
-    background: rgba(5, 22, 31, 0.97);
+    background: rgba(var(--surface-2-rgb), 0.97);
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
   }
@@ -2320,7 +2360,7 @@ button:disabled {
   padding: 7px;
   border: 1px solid var(--line-strong);
   border-radius: 14px;
-  background: rgba(6, 25, 34, 0.96);
+  background: rgba(var(--surface-2-rgb), 0.96);
   box-shadow: 0 20px 50px rgba(0, 0, 0, 0.42);
   -webkit-backdrop-filter: blur(22px);
   backdrop-filter: blur(22px);
@@ -2403,7 +2443,7 @@ button:disabled {
   padding: 6px;
   border: 1px solid var(--line-strong);
   border-radius: 14px;
-  background: rgba(6, 25, 34, 0.97);
+  background: rgba(var(--surface-2-rgb), 0.97);
   box-shadow: 0 20px 50px rgba(0, 0, 0, 0.42);
   -webkit-backdrop-filter: blur(22px);
   backdrop-filter: blur(22px);
@@ -2680,7 +2720,7 @@ button:disabled {
   padding: calc(10px + var(--safe-top)) calc(10px + var(--safe-right)) calc(10px + min(var(--safe-bottom, 0px), 72px)) calc(10px + var(--safe-left));
   /* 半透明底 + 模糊只是锦上添花：底色的 alpha 足够高，保证即使 backdrop-filter
      在部分 Android WebView 上失效（会整块不绘制，表现为黑屏），页面依然可读。 */
-  background: rgba(3, 14, 20, 0.88);
+  background: rgba(var(--deep-rgb), 0.88);
   backdrop-filter: blur(10px);
 }
 
@@ -2691,7 +2731,7 @@ button:disabled {
  */
 @supports not (backdrop-filter: blur(1px)) {
   .screen {
-    background: rgba(3, 14, 20, 0.97);
+    background: rgba(var(--deep-rgb), 0.97);
   }
 }
 
@@ -2706,7 +2746,7 @@ button:disabled {
   .screen {
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
-    background: rgba(3, 14, 20, 0.97);
+    background: rgba(var(--deep-rgb), 0.97);
   }
 }
 
@@ -2802,7 +2842,7 @@ button:disabled {
   padding: 8px 11px;
   border: 1px solid var(--line);
   border-radius: 11px;
-  background: rgba(8, 31, 42, 0.6);
+  background: rgba(var(--surface-rgb), 0.6);
   color: var(--faint);
 }
 
@@ -2907,7 +2947,7 @@ button:disabled {
 .ghost-button {
   padding: 8px 12px;
   border: 1px solid var(--line);
-  background: rgba(8, 31, 42, 0.5);
+  background: rgba(var(--surface-rgb), 0.5);
   color: var(--dim);
 }
 
@@ -3032,7 +3072,7 @@ button:disabled {
   border: 1px solid var(--line);
   border-radius: 11px;
   outline: none;
-  background: rgba(5, 22, 31, 0.65);
+  background: rgba(var(--surface-2-rgb), 0.65);
   color: var(--text);
   font-size: 13px;
 }
@@ -3175,7 +3215,7 @@ button:disabled {
   padding: 12px 13px;
   border: 1px solid var(--line);
   border-radius: 15px;
-  background: rgba(8, 31, 42, 0.45);
+  background: rgba(var(--surface-rgb), 0.45);
 }
 
 .memory-card.is-pinned {
@@ -3402,7 +3442,7 @@ button:disabled {
   min-width: 0;
   border: 1px solid var(--line);
   border-radius: 14px;
-  background: rgba(6, 24, 33, 0.5);
+  background: rgba(var(--surface-2-rgb), 0.5);
   overflow: hidden;
 }
 
@@ -3540,7 +3580,7 @@ button:disabled {
   padding: 14px 15px;
   border: 1px solid var(--line);
   border-radius: 16px;
-  background: rgba(8, 31, 42, 0.4);
+  background: rgba(var(--surface-rgb), 0.4);
 }
 
 .settings-card h2 {
@@ -3682,7 +3722,7 @@ button:disabled {
   padding: 10px 12px;
   border: 1px dashed var(--line);
   border-radius: 12px;
-  background: rgba(8, 31, 42, 0.35);
+  background: rgba(var(--surface-rgb), 0.35);
 }
 
 .appearance-preview-bubble {
@@ -3722,7 +3762,7 @@ button:disabled {
   margin: 8px 0 4px;
   border: 1px solid var(--line);
   border-radius: 12px;
-  background-color: rgba(3, 15, 21, 0.6);
+  background-color: rgba(var(--deep-rgb), 0.6);
   background-position: center;
   background-size: cover;
   background-repeat: no-repeat;
@@ -3837,7 +3877,7 @@ button:disabled {
   padding: 22px;
   border: 1px solid var(--line);
   border-radius: 26px;
-  background: rgba(5, 22, 31, 0.82);
+  background: rgba(var(--surface-2-rgb), 0.82);
   box-shadow: var(--shadow);
   backdrop-filter: blur(24px);
 }
@@ -3946,7 +3986,7 @@ button:disabled {
   padding: 13px;
   border: 1px solid var(--line);
   border-radius: 14px;
-  background: rgba(8, 31, 42, 0.4);
+  background: rgba(var(--surface-rgb), 0.4);
   color: var(--text);
   text-align: left;
 }
@@ -4001,7 +4041,7 @@ button:disabled {
   display: grid;
   place-items: center;
   padding: 16px;
-  background: rgba(2, 10, 15, 0.62);
+  background: rgba(var(--deep-rgb), 0.62);
   backdrop-filter: blur(6px);
   pointer-events: auto;
 }
@@ -4077,7 +4117,7 @@ button:disabled {
   overflow: auto;
   border: 1px solid var(--line);
   border-radius: 12px;
-  background: rgba(2, 10, 15, 0.6);
+  background: rgba(var(--deep-rgb), 0.6);
   color: #c8eef0;
   font: 11px/1.6 "JetBrains Mono", Consolas, monospace;
   white-space: pre-wrap;
@@ -4098,7 +4138,7 @@ button:disabled {
   position: fixed;
   inset: 0;
   z-index: var(--z-drawer);
-  background: rgba(2, 10, 15, 0.5);
+  background: rgba(var(--deep-rgb), 0.5);
   backdrop-filter: blur(4px);
   pointer-events: auto;
 }
@@ -4112,7 +4152,7 @@ button:disabled {
   display: flex;
   flex-direction: column;
   border-right: 1px solid var(--line);
-  background: rgba(4, 18, 25, 0.94);
+  background: rgba(var(--surface-2-rgb), 0.94);
   box-shadow: 30px 0 80px rgba(0, 0, 0, 0.4);
 }
 
@@ -5156,7 +5196,7 @@ button:disabled {
   border: 1px solid var(--line);
   border-radius: 11px;
   outline: none;
-  background: rgba(5, 22, 31, 0.65);
+  background: rgba(var(--surface-2-rgb), 0.65);
   color: var(--text);
   font-size: 13px;
   text-align: left;
@@ -5241,7 +5281,7 @@ button:disabled {
   max-height: 320px;
   /* 先给实色兜底，再写 backdrop-filter：手机上大面积的模糊会把整块涂黑，
      小面板虽然风险低，但一旦 blur 不生效/不支持，实色底能保证不出现白底。 */
-  background: rgba(5, 22, 31, 0.98);
+  background: rgba(var(--surface-2-rgb), 0.98);
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
   border: 1px solid var(--line-strong);
@@ -5510,7 +5550,7 @@ textarea,
   padding: 0 4px;
   border: 1px solid var(--line-strong);
   border-radius: 999px;
-  background: rgba(5, 22, 31, 0.98);
+  background: rgba(var(--surface-2-rgb), 0.98);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
   user-select: none;
   -webkit-user-select: none;
@@ -5749,7 +5789,7 @@ textarea,
   overflow-y: auto;
   border: 1px solid var(--line);
   border-radius: 10px;
-  background: rgba(5, 22, 31, 0.4);
+  background: rgba(var(--surface-2-rgb), 0.4);
 }
 
 .export-select-row {
@@ -5800,7 +5840,7 @@ textarea,
   padding: 10px;
   border: 1px solid var(--line);
   border-radius: 10px;
-  background: rgba(3, 14, 20, 0.7);
+  background: rgba(var(--deep-rgb), 0.7);
   color: var(--dim);
   font-size: 11px;
   line-height: 1.6;
@@ -5873,7 +5913,7 @@ textarea,
   padding: 8px 10px;
   border: 1px solid var(--line);
   border-radius: 11px;
-  background: rgba(8, 31, 42, 0.5);
+  background: rgba(var(--surface-rgb), 0.5);
 }
 
 .model-catalog-row.is-on {
@@ -5949,7 +5989,7 @@ textarea,
   padding: 8px 10px;
   border: 1px solid var(--line);
   border-radius: 10px;
-  background: rgba(3, 14, 20, 0.6);
+  background: rgba(var(--deep-rgb), 0.6);
   color: var(--text);
   font-size: 12px;
 }
@@ -5974,7 +6014,7 @@ textarea,
   padding: 9px 11px;
   border: 1px solid var(--line);
   border-radius: 11px;
-  background: rgba(3, 14, 20, 0.6);
+  background: rgba(var(--deep-rgb), 0.6);
   color: var(--text);
   font-size: 12px;
 }
@@ -6041,7 +6081,7 @@ textarea,
   padding: 12px 14px;
   border: 1px solid var(--line);
   border-radius: 14px;
-  background: rgba(8, 31, 42, 0.5);
+  background: rgba(var(--surface-rgb), 0.5);
   text-align: left;
 }
 
@@ -6220,7 +6260,7 @@ body:has(.modal-backdrop) .selection-copy {
   pointer-events: auto;
   border-bottom: none;
   padding-top: calc(11px + var(--safe-top));
-  background: linear-gradient(180deg, rgba(4, 20, 29, 0.86) 0%, rgba(4, 20, 29, 0.42) 62%, rgba(4, 20, 29, 0) 100%);
+  background: linear-gradient(180deg, rgba(var(--surface-2-rgb), 0.86) 0%, rgba(var(--surface-2-rgb), 0.42) 62%, rgba(var(--surface-2-rgb), 0) 100%);
 }
 
 .room-dock {
@@ -6396,7 +6436,7 @@ body:has(.modal-backdrop) .selection-copy {
   padding: 9px 6px;
   border: 1px solid var(--line);
   border-radius: 13px;
-  background: rgba(4, 20, 29, 0.35);
+  background: rgba(var(--surface-2-rgb), 0.35);
 }
 
 .room-stats span {
@@ -6587,7 +6627,7 @@ body:has(.modal-backdrop) .selection-copy {
   padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: 14px;
-  background: rgba(4, 20, 29, 0.28);
+  background: rgba(var(--surface-2-rgb), 0.28);
 }
 
 .room-toggle-text {
@@ -6800,7 +6840,7 @@ body:has(.modal-backdrop) .selection-copy {
   padding: 0;
   border: 1px solid var(--line);
   border-radius: 50%;
-  background: rgba(8, 31, 42, 0.72);
+  background: rgba(var(--surface-rgb), 0.72);
   color: var(--text);
   font-size: 20px;
   line-height: 1;
@@ -6857,7 +6897,7 @@ body:has(.modal-backdrop) .selection-copy {
   padding: 0;
   border: 1px solid var(--line);
   border-radius: 14px;
-  background: rgba(8, 31, 42, 0.66);
+  background: rgba(var(--surface-rgb), 0.66);
   color: var(--text);
   font-size: 26px;
   line-height: 1;
@@ -6957,7 +6997,7 @@ body:has(.modal-backdrop) .selection-copy {
   padding: 0;
   border: 1px solid rgba(127, 227, 212, 0.34);
   border-radius: 50%;
-  background: rgba(8, 31, 42, 0.42);
+  background: rgba(var(--surface-rgb), 0.42);
   color: var(--text);
   font-size: 12px;
   opacity: 0.3;

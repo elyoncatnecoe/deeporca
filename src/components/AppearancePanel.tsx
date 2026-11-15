@@ -16,17 +16,24 @@ import { ScreenHeader, Spinner } from './ui'
  * 三项能力都走 `actions.setSettings`，改完立刻落库、立刻生效，没有「保存」按钮。
  */
 
-/** 三套预设的强调色 / 用户气泡色。和 styles.css 的 :root 与 [data-tone] 规则一一对应。 */
+/** 三套预设的强调色 / 用户气泡色 / 页面底色。和 styles.css 的 :root 与 [data-tone] 规则一一对应。 */
 const TONE_ACCENT: Record<ThemeId, string> = {
   deep: '#ff9b7a',
-  iceberg: '#9fd8ea',
-  tropical: '#ffb27a',
+  iceberg: '#2f8ea6',
+  tropical: '#d9743e',
 }
 
 const TONE_BUBBLE: Record<ThemeId, string> = {
   deep: '#ffb195',
   iceberg: '#a9d6e5',
   tropical: '#ffcf9f',
+}
+
+/** 页面底色预设：deep 深海蓝黑 / iceberg 冷白 / tropical 奶油暖白。 */
+const TONE_BASE: Record<ThemeId, string> = {
+  deep: '#04141d',
+  iceberg: '#eef4f7',
+  tropical: '#fdf6ef',
 }
 
 /* ------------------------------------------------------------ 颜色工具 */
@@ -40,6 +47,12 @@ function rgbOf(hex: string): [number, number, number] {
 function hexOf(red: number, green: number, blue: number): string {
   const part = (value: number): string => Math.round(Math.max(0, Math.min(255, value))).toString(16).padStart(2, '0')
   return `#${part(red)}${part(green)}${part(blue)}`
+}
+
+/** `#rrggbb` → `"r, g, b"`，给 `rgba(var(--surface-rgb), α)` 这种三元组变量用。 */
+function rgbTriple(hex: string): string {
+  const [red, green, blue] = rgbOf(hex)
+  return `${red}, ${green}, ${blue}`
 }
 
 /** amount < 0 变暗，> 0 变亮；用来从一个颜色推出渐变第二个色标。 */
@@ -73,7 +86,11 @@ function luminanceOf(hex: string): number {
  * 「在深色底上当文字色」用的（链接、选中态、代码高亮），让用户随手挑一个
  * 深色就能把这些字变得看不清，收益不值这个风险。
  */
-export function appearanceStyle(accent: string | null, bubble: string | null): CSSProperties | undefined {
+export function appearanceStyle(
+  accent: string | null,
+  bubble: string | null,
+  base: string | null = null,
+): CSSProperties | undefined {
   const vars: Record<string, string> = {}
   if (accent !== null) {
     vars['--accent'] = accent
@@ -88,6 +105,23 @@ export function appearanceStyle(accent: string | null, bubble: string | null): C
     vars['--bubble-user-ink-soft'] = alphaOf(ink, 0.62)
     vars['--bubble-user-ink-faint'] = alphaOf(ink, 0.45)
     vars['--bubble-user-shadow'] = alphaOf(bubble, 0.18)
+  }
+  if (base !== null) {
+    /*
+     * 底色：不只换 --bg。面板/卡片/文字全都从这同一个颜色派生，
+     * 否则「换了底色但卡片还是深色玻璃」等于没换。
+     * 用亮度判断该走浅色版还是深色版，文字自动深/浅，避免白底白字。
+     */
+    const light = luminanceOf(base) > 0.56
+    vars['--bg'] = base
+    vars['--bg-2'] = shade(base, light ? -0.06 : 0.08)
+    vars['--surface-rgb'] = rgbTriple(shade(base, light ? 0.55 : 0.1))
+    vars['--surface-2-rgb'] = rgbTriple(shade(base, light ? 0.34 : 0.04))
+    vars['--deep-rgb'] = rgbTriple(shade(base, light ? -0.12 : -0.35))
+    vars['--text'] = light ? '#14232b' : '#e8f7f9'
+    vars['--dim'] = light ? 'rgba(20, 35, 43, 0.72)' : '#93b7c0'
+    vars['--faint'] = light ? 'rgba(20, 35, 43, 0.52)' : '#628890'
+    vars.colorScheme = light ? 'light' : 'dark'
   }
   if (Object.keys(vars).length === 0) return undefined
   return vars as CSSProperties
@@ -242,6 +276,7 @@ export function AppearanceScreen() {
 
   const accentValue = settings.customAccent ?? TONE_ACCENT[settings.appTone]
   const bubbleValue = settings.customBubble ?? TONE_BUBBLE[settings.appTone]
+  const baseValue = settings.customBase ?? TONE_BASE[settings.appTone]
   const backdrop = settings.chatBackdrop
   const backdropKb = backdrop === null ? 0 : Math.round((backdrop.length * 3) / 4 / 1024)
 
@@ -258,8 +293,9 @@ export function AppearanceScreen() {
           <section className="settings-card">
             <h2><Palette size={17} /> 界面色调</h2>
             <p className="settings-hint">
-              只改 App 自己的强调色和气泡配色。海底主题、虎鲸皮肤、光效和画质都在「布置」里 ——
-              两边已经解绑，换一个不会带着另一个一起变。
+              换的是 App 自己的整套底色：深海是深蓝黑，雾霭是冷白，暖阳是奶油暖白 ——
+              面板、卡片和文字会跟着底色一起深浅，不是只换气泡。海底主题、虎鲸皮肤、
+              光效和画质都在「布置」里，两边已经解绑，换一个不会带着另一个一起变。
             </p>
             <div className="theme-grid">
               {APP_TONES.map((tone) => (
@@ -285,8 +321,8 @@ export function AppearanceScreen() {
           <section className="settings-card">
             <h2><Sparkles size={17} /> 自定义配色</h2>
             <p className="settings-hint">
-              换掉强调色和你的气泡颜色，和上面的三套色调可以叠着用：没选的时候跟着色调走，
-              选了就以你为准。只覆盖强调色与气泡，页面底色还是海底那套。
+              换掉强调色、你的气泡颜色和页面底色，和上面的三套色调可以叠着用：没选的时候跟着色调走，
+              选了就以你为准。选一个浅底色时，面板和文字会自动转成浅色版，不会出现白底白字。
             </p>
 
             <div className="appearance-color-row">
@@ -328,6 +364,28 @@ export function AppearanceScreen() {
                 className="ghost-button appearance-color-reset"
                 onClick={() => void actions.setSettings({ customBubble: null })}
                 disabled={settings.customBubble === null}
+              >
+                <RefreshCw size={13} /> 跟随预设
+              </button>
+            </div>
+
+            <div className="appearance-color-row">
+              <div className="appearance-color-copy">
+                <strong>页面底色</strong>
+                <small>{settings.customBase === null ? '跟随界面色调' : settings.customBase}</small>
+              </div>
+              <input
+                type="color"
+                className="appearance-color-input"
+                aria-label="自定义页面底色"
+                value={baseValue}
+                onChange={(event) => void actions.setSettings({ customBase: event.target.value })}
+              />
+              <button
+                type="button"
+                className="ghost-button appearance-color-reset"
+                onClick={() => void actions.setSettings({ customBase: null })}
+                disabled={settings.customBase === null}
               >
                 <RefreshCw size={13} /> 跟随预设
               </button>
