@@ -24,7 +24,7 @@ type SelState = {
   end: DomPoint
 }
 
-const SELECT_ROOT = '.bubble-body, .reasoning'
+const SELECT_ROOT = '.bubble-body, .reasoning-panel, .reasoning-body, .tool-card'
 const LONG_PRESS_MS = 450
 const MOVE_TOLERANCE = 10
 
@@ -169,7 +169,8 @@ export function TextSelectionLayer() {
         if (start === null) return
         const point = caretPointAt(start.x, start.y)
         if (point === null) return
-        containerRef.current = root
+        const bound = (root.querySelector('.reasoning-body') ?? root.querySelector('.markdown') ?? root) as Element
+        containerRef.current = bound
         const word = wordAround(point)
         activeRef.current = true
         dragRef.current = 'end'
@@ -192,6 +193,8 @@ export function TextSelectionLayer() {
       if (dragRef.current === null) return
       const point = caretPointAt(touch.clientX, touch.clientY)
       if (point === null) return
+      const bound = containerRef.current
+      if (bound !== null && !bound.contains(point.node)) return
       setSel((current) => {
         if (current === null) return current
         const startPt = dragRef.current === 'start' ? point : current.start
@@ -310,6 +313,8 @@ export function TextSelectionLayer() {
     if (touch === undefined) return
     const point = caretPointAt(touch.clientX, touch.clientY)
     if (point === null) return
+    const bound = containerRef.current
+    if (bound !== null && !bound.contains(point.node)) return
     setSel((current) => {
       if (current === null) return current
       const startPt = which === 'start' ? point : current.start

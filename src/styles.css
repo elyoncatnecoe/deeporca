@@ -7073,7 +7073,9 @@ body:has(.modal-backdrop) .selection-copy {
  * �ص��������ԭ��ѡ�񣬽��� TextSelectionLayer �Լ������� + �ֱ� + ��������
  */
 body.ds-custom-select .bubble-body,
-body.ds-custom-select .reasoning {
+body.ds-custom-select .reasoning-panel,
+body.ds-custom-select .reasoning,
+body.ds-custom-select .tool-card {
   -webkit-user-select: none;
   user-select: none;
   -webkit-touch-callout: none;
