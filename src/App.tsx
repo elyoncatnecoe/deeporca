@@ -22,6 +22,7 @@ import { Toast } from './components/Toast'
 import { ApprovalGate } from './components/ApprovalGate'
 import { Workshop } from './components/Workshop'
 import { SelectionCopyBar } from './components/SelectionCopyBar'
+import { TextSelectionLayer } from './components/TextSelectionLayer'
 import { ConfirmHost } from './components/ConfirmDialog'
 import { RoomScreen } from './components/room/RoomScreen'
 import { ZenDot } from './components/ZenDot'
@@ -120,6 +121,7 @@ export default function App() {
         见 android/.../DeepSeaWebView.java。桌面端也保留，右键/选中时同样可用。
       */}
       <SelectionCopyBar />
+      <TextSelectionLayer />
       <ConfirmHost />
       {/* 欣赏模式唯一的出口，必须留在 .ui 外面才不会被一起藏掉。 */}
       <ZenDot />

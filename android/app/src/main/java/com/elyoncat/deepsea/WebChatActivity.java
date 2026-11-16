@@ -59,12 +59,9 @@ public class WebChatActivity extends AppCompatActivity {
      */
     @Override
     public ActionMode onWindowStartingActionMode(ActionMode.Callback callback, int type) {
-        if (type == ActionMode.TYPE_FLOATING && callback != null && getWindow() != null) {
-            View anchor = getWindow().getDecorView();
-            if (anchor != null) {
-                return SelectionMenuSuppressor.noOp(anchor, callback);
-            }
-        }
+        // 网页版（chat.deepseek.com）对齐 demo：恢复系统原生文本选择工具条，
+        // 不再压制 TYPE_FLOATING。之前压制是为了避免白块，但代价是网页里
+        // 长按完全没有复制/全选，体验比原生差很多；网页版以功能为准。
         return super.onWindowStartingActionMode(callback, type);
     }
 

@@ -7066,3 +7066,59 @@ body:has(.modal-backdrop) .selection-copy {
   --z-stage-speech: 10003;
   --z-pet: 2147483647;
 }
+
+/* ---------------------------------------------- 自绘文本选择（主界面） */
+/*
+ * 原生选择手柄在部分 ROM 上闪白且主题改不动，主界面消息区改为自绘选择。
+ * 关掉这两块的原生选择，交给 TextSelectionLayer 自己画高亮 + 手柄 + 工具条。
+ */
+body.ds-custom-select .bubble-body,
+body.ds-custom-select .reasoning {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.ds-sel-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 118;
+  pointer-events: none;
+}
+
+.ds-sel-hi {
+  position: fixed;
+  background: rgba(127, 227, 212, 0.32);
+  border-radius: 2px;
+  pointer-events: none;
+}
+
+.ds-sel-handle {
+  position: fixed;
+  z-index: 121;
+  width: 18px;
+  height: 22px;
+  margin-left: -9px;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.ds-sel-handle::before {
+  content: "";
+  display: block;
+  width: 2px;
+  height: 18px;
+  margin: 2px auto 0;
+  background: var(--aqua);
+  border-radius: 2px;
+}
+
+.ds-sel-handle::after {
+  content: "";
+  display: block;
+  width: 12px;
+  height: 12px;
+  margin: -20px auto 0;
+  border-radius: 50%;
+  background: var(--aqua);
+}
