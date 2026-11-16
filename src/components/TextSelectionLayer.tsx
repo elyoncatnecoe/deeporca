@@ -86,16 +86,28 @@ function buildRange(a: DomPoint, b: DomPoint): Range | null {
 }
 
 function rectsOf(range: Range): SelState['rects'] {
-  const rects = Array.from(range.getClientRects())
-    .filter((rect) => rect.width > 0 && rect.height > 0)
-    .map((rect) => ({ left: rect.left, top: rect.top, width: rect.width, height: rect.height }))
-  if (rects.length === 0) {
+  const vw = window.innerWidth
+  const vh = window.innerHeight
+  const raw = Array.from(range.getClientRects())
+  const out: SelState['rects'] = []
+  for (const rect of raw) {
+    if (rect.width <= 0 || rect.height <= 0) continue
+    // 防御：某些 range 会返回一个覆盖整屏的矩形（就是之前“整屏绿蒙版”的来源），丢掉它。
+    if (rect.width > vw * 1.02 || rect.height > vh * 0.6) continue
+    const left = Math.max(0, Math.min(rect.left, vw))
+    const top = Math.max(0, Math.min(rect.top, vh))
+    const right = Math.max(0, Math.min(rect.left + rect.width, vw))
+    const bottom = Math.max(0, Math.min(rect.top + rect.height, vh))
+    if (right - left < 1 || bottom - top < 1) continue
+    out.push({ left, top, width: right - left, height: bottom - top })
+  }
+  if (out.length === 0) {
     const box = range.getBoundingClientRect()
-    if (box.width > 0 && box.height > 0) {
-      rects.push({ left: box.left, top: box.top, width: box.width, height: box.height })
+    if (box.width > 0 && box.height > 0 && box.width <= vw * 1.02 && box.height <= vh * 0.6) {
+      out.push({ left: Math.max(0, box.left), top: Math.max(0, box.top), width: Math.min(box.width, vw), height: Math.min(box.height, vh) })
     }
   }
-  return rects
+  return out
 }
 
 export function TextSelectionLayer() {
@@ -246,6 +258,15 @@ export function TextSelectionLayer() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [screen])
 
+  useEffect(() => {
+    if (!isAndroid) return
+    if (sel === null) {
+      document.body.classList.remove('ds-custom-selecting')
+      return
+    }
+    document.body.classList.add('ds-custom-selecting')
+  }, [sel])
+
   if (!isAndroid || sel === null) return null
 
   const toast = (message: string): void => {
@@ -343,11 +364,11 @@ export function TextSelectionLayer() {
         onTouchEnd={endHandle}
         onTouchCancel={endHandle}
       />
-      <div className="selection-copy ds-sel-ui" style={{ left: sel.toolbar.left, top: sel.toolbar.top }}>
-        <button type="button" className="selection-copy-item" onMouseDown={(e) => e.preventDefault()} onClick={() => void doCopy()}>
+      <div className="ds-sel-toolbar ds-sel-ui" style={{ left: sel.toolbar.left, top: sel.toolbar.top }}>
+        <button type="button" className="ds-sel-toolbar-item" onMouseDown={(e) => e.preventDefault()} onClick={() => void doCopy()}>
           复制
         </button>
-        <button type="button" className="selection-copy-item" onMouseDown={(e) => e.preventDefault()} onClick={doSelectAll}>
+        <button type="button" className="ds-sel-toolbar-item" onMouseDown={(e) => e.preventDefault()} onClick={doSelectAll}>
           全选
         </button>
       </div>

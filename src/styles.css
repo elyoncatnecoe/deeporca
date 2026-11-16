@@ -3179,7 +3179,7 @@ button:disabled {
 }
 
 .memory-card.is-pinned {
-  border-color: rgba(127, 227, 212, 0.32);
+  border-color: rgba(127, 227, 212, 0.22);
   background: rgba(127, 227, 212, 0.05);
 }
 
@@ -7067,10 +7067,10 @@ body:has(.modal-backdrop) .selection-copy {
   --z-pet: 2147483647;
 }
 
-/* ---------------------------------------------- ×Ô»æÎÄ±¾Ñ¡Ôñ£¨Ö÷½çÃæ£© */
+/* ---------------------------------------------- ï¿½Ô»ï¿½ï¿½Ä±ï¿½Ñ¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½æ£© */
 /*
- * Ô­ÉúÑ¡ÔñÊÖ±úÔÚ²¿·Ö ROM ÉÏÉÁ°×ÇÒÖ÷Ìâ¸Ä²»¶¯£¬Ö÷½çÃæÏûÏ¢Çø¸ÄÎª×Ô»æÑ¡Ôñ¡£
- * ¹ØµôÕâÁ½¿éµÄÔ­ÉúÑ¡Ôñ£¬½»¸ø TextSelectionLayer ×Ô¼º»­¸ßÁÁ + ÊÖ±ú + ¹¤¾ßÌõ¡£
+ * Ô­ï¿½ï¿½Ñ¡ï¿½ï¿½ï¿½Ö±ï¿½ï¿½Ú²ï¿½ï¿½ï¿½ ROM ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä²ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ï¢ï¿½ï¿½ï¿½ï¿½Îªï¿½Ô»ï¿½Ñ¡ï¿½ï¿½
+ * ï¿½Øµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô­ï¿½ï¿½Ñ¡ï¿½ñ£¬½ï¿½ï¿½ï¿½ TextSelectionLayer ï¿½Ô¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ + ï¿½Ö±ï¿½ + ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
  */
 body.ds-custom-select .bubble-body,
 body.ds-custom-select .reasoning {
@@ -7084,11 +7084,12 @@ body.ds-custom-select .reasoning {
   inset: 0;
   z-index: 118;
   pointer-events: none;
+  overflow: hidden;
 }
 
 .ds-sel-hi {
   position: fixed;
-  background: rgba(127, 227, 212, 0.32);
+  background: rgba(127, 227, 212, 0.22);
   border-radius: 2px;
   pointer-events: none;
 }
@@ -7121,4 +7122,58 @@ body.ds-custom-select .reasoning {
   margin: -20px auto 0;
   border-radius: 50%;
   background: var(--aqua);
+}
+
+/* ï¿½Ô»ï¿½Ñ¡ï¿½ï¿½Ê±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ SelectionCopyBar ï¿½Ô´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½/Ò³ï¿½æ£©ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Øµï¿½ */
+body.ds-custom-selecting .selection-copy {
+  display: none !important;
+}
+
+/* ï¿½Ô»ï¿½Ñ¡ï¿½ñ¹¤¾ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ SelectionCopyBar ï¿½ï¿½ .selection-copy ï¿½ï¿½ï¿½Ö¿ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Øµï¿½ï¿½ï¿½ */
+.ds-sel-toolbar {
+  position: fixed;
+  z-index: 122;
+  display: flex;
+  align-items: stretch;
+  height: 40px;
+  padding: 0 4px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: rgba(5, 22, 31, 0.98);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
+}
+
+.ds-sel-toolbar-item {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  line-height: 38px;
+  padding: 0 14px;
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ds-sel-toolbar-item + .ds-sel-toolbar-item {
+  position: relative;
+}
+
+.ds-sel-toolbar-item + .ds-sel-toolbar-item::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 11px;
+  bottom: 11px;
+  width: 1px;
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.ds-sel-toolbar-item:active {
+  background: rgba(127, 227, 212, 0.18);
 }
